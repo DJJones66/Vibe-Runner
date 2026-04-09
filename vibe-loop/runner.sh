@@ -13,6 +13,7 @@ RUN_LOG="$LOG_DIR/run.log"
 HALT_FILE="$LOOP_ROOT/HALT"
 
 MODEL="${MODEL:-gpt-5.4}"
+REASONING_EFFORT="${REASONING_EFFORT:-}"
 SANDBOX="${SANDBOX:-workspace-write}"
 AUTO_PUSH="${AUTO_PUSH:-0}"
 USE_SEARCH=0
@@ -48,6 +49,7 @@ Options:
 
 Environment:
   MODEL            Codex model (default: gpt-5.4)
+  REASONING_EFFORT Optional reasoning effort passed via codex config override
   SANDBOX          Codex sandbox mode (default: workspace-write)
   AUTO_PUSH        1 to push branch after successful commit (default: 0)
   AUTO_FIX_VALIDATION  1 to let codex attempt one-pass fixes after validation fails (default: 1)
@@ -197,6 +199,9 @@ run_one_task() {
 
   local -a cmd
   cmd=(codex exec -C "$REPO_ROOT" -m "$MODEL" -s "$SANDBOX" -o "$last_msg")
+  if [[ -n "$REASONING_EFFORT" ]]; then
+    cmd+=(-c "model_reasoning_effort=\"$REASONING_EFFORT\"")
+  fi
   if [[ "$USE_SEARCH" == "1" ]]; then
     if supports_exec_search; then
       cmd+=(--search)
@@ -262,6 +267,9 @@ PY
 
       local -a fix_cmd
       fix_cmd=(codex exec -C "$REPO_ROOT" -m "$MODEL" -s "$SANDBOX" -o "$fix_msg_file")
+      if [[ -n "$REASONING_EFFORT" ]]; then
+        fix_cmd+=(-c "model_reasoning_effort=\"$REASONING_EFFORT\"")
+      fi
       if [[ "$USE_SEARCH" == "1" ]]; then
         if supports_exec_search; then
           fix_cmd+=(--search)
@@ -342,7 +350,7 @@ if [[ "$STATUS_MILESTONES" == "1" ]]; then
   exit 0
 fi
 
-log_event "Runner start: model=$MODEL sandbox=$SANDBOX search=$USE_SEARCH dry_run=$DRY_RUN max_iterations=$MAX_ITERATIONS"
+log_event "Runner start: model=$MODEL reasoning_effort=${REASONING_EFFORT:-default} sandbox=$SANDBOX search=$USE_SEARCH dry_run=$DRY_RUN max_iterations=$MAX_ITERATIONS"
 
 iter=1
 while [[ "$iter" -le "$MAX_ITERATIONS" ]]; do

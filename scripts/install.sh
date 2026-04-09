@@ -31,16 +31,18 @@ copy_if_needed() {
 }
 
 install_or_update() {
-  mkdir -p "$DEST_LOOP" "$DEST_LOOP/logs" "$DEST_LOOP/reports"
+  mkdir -p "$DEST_LOOP" "$DEST_LOOP/logs" "$DEST_LOOP/reports" "$DEST_LOOP/schemas"
 
   cp "$SRC_LOOP/runner.sh" "$DEST_LOOP/runner.sh"
+  cp "$SRC_LOOP/generate_prd.sh" "$DEST_LOOP/generate_prd.sh"
   cp "$SRC_LOOP/taskctl.py" "$DEST_LOOP/taskctl.py"
+  cp "$SRC_LOOP/schemas/prd.schema.json" "$DEST_LOOP/schemas/prd.schema.json"
   cp "$SRC_LOOP/.gitignore" "$DEST_LOOP/.gitignore"
 
   copy_if_needed "$SRC_LOOP/CODEX.md" "$DEST_LOOP/CODEX.md"
   copy_if_needed "$SRC_LOOP/prd.json" "$DEST_LOOP/prd.json"
 
-  chmod +x "$DEST_LOOP/runner.sh" "$DEST_LOOP/taskctl.py"
+  chmod +x "$DEST_LOOP/runner.sh" "$DEST_LOOP/generate_prd.sh" "$DEST_LOOP/taskctl.py"
 
   echo "[vibe-runner] $ACTION complete"
   echo "target: $DEST_LOOP"
