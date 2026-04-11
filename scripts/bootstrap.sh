@@ -3,8 +3,8 @@ set -euo pipefail
 
 ACTION="install"
 TARGET_REPO="$PWD"
-REPO_URL="${VIBE_RUNNER_REPO_URL:-https://github.com/REPLACE_ME/Vide-Runner}"
-VERSION="${VIBE_RUNNER_VERSION:-}"
+REPO_URL="${VIBE_RUNNER_REPO_URL:-https://github.com/DJJones66/Vibe-Runner}"
+VERSION="${VIBE_RUNNER_VERSION:-main}"
 SHA256="${VIBE_RUNNER_SHA256:-}"
 CHECKSUM_URL="${VIBE_RUNNER_CHECKSUM_URL:-}"
 FORCE="${FORCE:-0}"
@@ -21,8 +21,8 @@ Usage:
 Options:
   --action <install|update|uninstall>   Operation to perform (default: install)
   --target <path>                       Target repository path (default: current directory)
-  --repo-url <url>                      Repo URL without trailing slash
-  --version <tag-or-branch>             Version to install (recommended: tag, e.g. v1.2.3)
+  --repo-url <url>                      Repo URL without trailing slash (default: https://github.com/DJJones66/Vibe-Runner)
+  --version <tag-or-branch>             Version to install (default: main; recommended for prod: tag, e.g. v1.2.3)
   --sha256 <hex>                        Expected SHA256 for downloaded archive
   --checksum-url <url>                  URL to checksums file (format: '<sha>  <filename>')
   --allow-unsigned                      Allow install without checksum verification
@@ -103,11 +103,6 @@ parse_args() {
 }
 
 resolve_archive_url() {
-  if [[ -z "$VERSION" ]]; then
-    VERSION="main"
-    echo "[vibe-runner] no --version provided; defaulting to branch '$VERSION' (not pinned)" >&2
-  fi
-
   if [[ "$VERSION" == "main" || "$VERSION" == "master" ]]; then
     printf '%s/archive/refs/heads/%s.tar.gz' "${REPO_URL%/}" "$VERSION"
   else

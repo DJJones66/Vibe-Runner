@@ -120,10 +120,11 @@ Options:
   - Default: current directory.
 - `--repo-url <url>`
   - Vibe Runner repository base URL (no trailing slash).
+  - Default: `https://github.com/DJJones66/Vibe-Runner`.
 - `--version <tag-or-branch>`
   - Version to fetch.
+  - Default: `main`.
   - Recommended: release tag (for example `v1.0.0`).
-  - If omitted: defaults to `main`.
 - `--sha256 <hex>`
   - Expected SHA256 of the downloaded archive.
 - `--checksum-url <url>`
@@ -155,6 +156,10 @@ Security behavior:
 
 Examples:
 ```bash
+# install defaults (current dir target, default repo URL, version main)
+curl -fsSL https://raw.githubusercontent.com/DJJones66/Vibe-Runner/main/scripts/bootstrap.sh \
+  | bash -s -- --allow-unsigned
+
 # install pinned release with explicit checksum
 curl -fsSL https://raw.githubusercontent.com/<owner>/Vide-Runner/main/scripts/bootstrap.sh \
   | bash -s -- --version v1.0.0 --sha256 <sha256>
