@@ -205,6 +205,8 @@ Validation Commands:
 * Use common, widely available tools (bash, python, node, curl, pytest, etc.).
 * Commands must be realistic and runnable in a standard development environment.
 * Do not include placeholder or non-functional commands.
+* If using `python -c`, the inline snippet must be syntactically valid exactly as written.
+* Do not place block statements like `def`, `class`, `try`, `for`, `while`, or `if` after semicolons in `python -c` one-liners.
 
 Consistency:
 
@@ -242,8 +244,9 @@ PROMPT_HEADER
 import datetime as dt
 import json
 import os
+import shlex
 import sys
-from typing import Any
+from typing import Any, Optional
 
 generated_path, out_path, mode, dry_run = sys.argv[1:5]
 
@@ -276,7 +279,56 @@ def normalize(prd: dict[str, Any]) -> dict[str, Any]:
 
     return prd
 
+def extract_python_c_snippet(command: str) -> Optional[str]:
+    try:
+        parts = shlex.split(command, posix=True)
+    except ValueError as exc:
+        raise ValueError(f"invalid shell quoting in validation command: {exc}") from exc
+
+    for idx, token in enumerate(parts):
+        base = os.path.basename(token)
+        if base not in {"python", "python3", "py"}:
+            continue
+
+        j = idx + 1
+        while j < len(parts):
+            arg = parts[j]
+            if arg == "-c":
+                if j + 1 >= len(parts):
+                    raise ValueError("python -c is missing inline code")
+                return parts[j + 1]
+            if arg.startswith("-c") and arg != "-c":
+                return arg[2:]
+            j += 1
+        return None
+
+    return None
+
+def validate_generated_tasks(prd: dict[str, Any]) -> None:
+    for task in prd.get("tasks", []):
+        task_id = str(task.get("id", "")).strip() or "<missing-id>"
+        validations = task.get("validation", [])
+        if not isinstance(validations, list):
+            raise ValueError(f"task {task_id}: validation must be a list")
+
+        for index, command in enumerate(validations, start=1):
+            if not isinstance(command, str) or not command.strip():
+                raise ValueError(f"task {task_id}: validation[{index}] must be a non-empty string")
+
+            snippet = extract_python_c_snippet(command)
+            if snippet is None:
+                continue
+
+            try:
+                compile(snippet, "<python -c>", "exec")
+            except SyntaxError as exc:
+                raise ValueError(
+                    f"task {task_id}: validation[{index}] has invalid python -c syntax "
+                    f"(line {exc.lineno}, column {exc.offset}): {exc.msg}"
+                ) from exc
+
 generated = normalize(load_json(generated_path))
+validate_generated_tasks(generated)
 
 if mode == "append" and os.path.exists(out_path):
     existing = normalize(load_json(out_path))
