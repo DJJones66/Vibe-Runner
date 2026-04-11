@@ -156,14 +156,62 @@ main() {
 Generate a complete Vibe Runner PRD JSON document.
 
 Requirements:
-- Return valid JSON only.
-- Match the provided JSON schema exactly.
-- Keep statuses as "pending" for newly generated tasks.
-- Use deterministic task IDs in the format TASK-001, TASK-002, etc.
-- Use ascending integer priorities starting at 1.
-- Keep depends_on references valid and only pointing to task ids that exist.
-- Include practical acceptance criteria and validation commands for each task.
-- Keep each task scoped and implementation-ready for automated execution.
+
+* Return valid JSON only. Do not include any prose, comments, or markdown.
+* Output must be deterministic: identical input must produce identical JSON output.
+* Match the provided JSON schema exactly.
+* Do not include any fields not defined in the schema.
+
+General:
+
+* Populate all meaningful fields; do not rely on defaults unless necessary.
+* Do not include placeholder text such as "TODO", "TBD", or "to be implemented".
+* Do not hallucinate tools, APIs, files, or technologies not implied by the input.
+
+Task Structure:
+
+* Generate between 5 and 20 tasks unless the scope clearly requires otherwise.
+* Use deterministic task IDs in the format TASK-001, TASK-002, TASK-003, etc.
+* Assign priorities as ascending integers starting at 1 (TASK-001 has priority 1, etc.).
+* All tasks must have status set to "pending".
+* Each task must include: id, title, prompt, priority, status, depends_on, acceptance, validation.
+
+Task Design:
+
+* Each task must represent a single, atomic, testable unit of work.
+* Tasks must not overlap in responsibility.
+* Avoid trivial setup-only tasks unless required for execution.
+* Avoid combining multiple unrelated concerns into one task.
+* Tasks must be written so an autonomous coding agent can execute them without additional clarification.
+* Include concrete implementation details when implied (file paths, modules, endpoints, commands).
+
+Dependencies:
+
+* depends_on must only reference valid task IDs present in the output.
+* A task may only depend on tasks with lower priority numbers.
+* Do not create circular dependencies.
+* Only include dependencies when they are strictly necessary.
+
+Acceptance Criteria:
+
+* acceptance must be a list of specific, measurable, binary (pass/fail) conditions.
+* Each criterion must describe an observable outcome.
+* Avoid vague language such as "works correctly", "is robust", or "is optimized".
+
+Validation Commands:
+
+* validation must be a list of executable shell commands.
+* Commands must directly verify the acceptance criteria.
+* Use common, widely available tools (bash, python, node, curl, pytest, etc.).
+* Commands must be realistic and runnable in a standard development environment.
+* Do not include placeholder or non-functional commands.
+
+Consistency:
+
+* Ensure task IDs, priorities, and dependencies are consistent and logically ordered.
+* Ensure no duplicate task IDs.
+* Ensure all referenced dependencies exist.
+
 PROMPT_HEADER
     echo
     echo "Source input:"
