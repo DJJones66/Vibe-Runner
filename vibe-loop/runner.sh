@@ -17,8 +17,9 @@ REASONING_EFFORT="${REASONING_EFFORT:-}"
 SANDBOX="${SANDBOX:-workspace-write}"
 AUTO_PUSH="${AUTO_PUSH:-0}"
 USE_SEARCH=0
-AUTO_FIX_VALIDATION="${AUTO_FIX_VALIDATION:-1}"
+AUTO_FIX_VALIDATION="${AUTO_FIX_VALIDATION:-0}"
 MAX_AUTO_FIX_ATTEMPTS="${MAX_AUTO_FIX_ATTEMPTS:-1}"
+AUTO_BLOCK_ENV_FAILURE="${AUTO_BLOCK_ENV_FAILURE:-1}"
 DRY_RUN=0
 STATUS_ONLY=0
 STATUS_MILESTONES=0
@@ -52,8 +53,9 @@ Environment:
   REASONING_EFFORT Optional reasoning effort passed via codex config override
   SANDBOX          Codex sandbox mode (default: workspace-write)
   AUTO_PUSH        1 to push branch after successful commit (default: 0)
-  AUTO_FIX_VALIDATION  1 to let codex attempt one-pass fixes after validation fails (default: 1)
+  AUTO_FIX_VALIDATION  1 to let codex attempt one-pass fixes after validation fails (default: 0)
   MAX_AUTO_FIX_ATTEMPTS  Number of validation auto-fix attempts (default: 1)
+  AUTO_BLOCK_ENV_FAILURE  1 to mark blocked when validation fails from missing env/deps (default: 1)
   HALT=true        Stop before next task starts
 USAGE
 }
@@ -111,6 +113,13 @@ require_tools() {
 
 supports_exec_search() {
   codex exec --help 2>/dev/null | rg -q -- '--search'
+}
+
+validation_indicates_env_block() {
+  local output_file="$1"
+  grep -Eqi \
+    'EAI_AGAIN|ENOTFOUND|Temporary failure in name resolution|Could not resolve host|network_access=false|command not found|vitest: not found|pytest: command not found|npm: command not found|node: command not found|python: command not found|python3: command not found|Cannot find module|Cannot find type definition file|ModuleNotFoundError|No module named' \
+    "$output_file"
 }
 
 ensure_clean_git() {
@@ -222,10 +231,20 @@ run_one_task() {
   log_event "Wrote report: $report_rel"
 
   local validation_ok=0
-  if python3 "$TASKCTL" validate "$PRD_FILE" "$id" "$REPO_ROOT" >>"$RUN_LOG" 2>&1; then
+  local validation_output_file
+  validation_output_file="$(mktemp)"
+  if python3 "$TASKCTL" validate "$PRD_FILE" "$id" "$REPO_ROOT" >"$validation_output_file" 2>&1; then
+    cat "$validation_output_file" >>"$RUN_LOG"
     validation_ok=1
   else
+    cat "$validation_output_file" >>"$RUN_LOG"
     log_event "Task $id failed validation on first pass"
+    if [[ "$AUTO_BLOCK_ENV_FAILURE" == "1" ]] && validation_indicates_env_block "$validation_output_file"; then
+      python3 "$TASKCTL" mark "$PRD_FILE" "$id" "blocked" "validation blocked by environment/dependencies; see logs/run.log"
+      log_event "Task $id blocked by environment/dependencies during validation"
+      rm -f "$prompt_file" "$last_msg" "$validation_output_file"
+      return 1
+    fi
   fi
 
   if [[ "$validation_ok" == "0" && "$AUTO_FIX_VALIDATION" == "1" ]]; then
@@ -262,6 +281,8 @@ PY
         echo "Requirements:"
         echo "- Make minimal, targeted fixes."
         echo "- Do not broaden scope beyond this task."
+        echo "- Do not modify validation commands or test/build scripts just to make checks pass."
+        echo "- If blocked by missing dependencies, tools, network, or permissions, report it explicitly and stop."
         echo "- Re-run relevant checks mentally and leave a short summary."
       } >"$fix_prompt_file"
 
@@ -287,9 +308,18 @@ PY
         } >>"$report_abs"
       fi
 
-      if python3 "$TASKCTL" validate "$PRD_FILE" "$id" "$REPO_ROOT" >>"$RUN_LOG" 2>&1; then
+      if python3 "$TASKCTL" validate "$PRD_FILE" "$id" "$REPO_ROOT" >"$validation_output_file" 2>&1; then
+        cat "$validation_output_file" >>"$RUN_LOG"
         validation_ok=1
         log_event "Validation passed for $id after auto-fix attempt $attempt"
+      else
+        cat "$validation_output_file" >>"$RUN_LOG"
+        if [[ "$AUTO_BLOCK_ENV_FAILURE" == "1" ]] && validation_indicates_env_block "$validation_output_file"; then
+          python3 "$TASKCTL" mark "$PRD_FILE" "$id" "blocked" "validation blocked by environment/dependencies; see logs/run.log"
+          log_event "Task $id blocked by environment/dependencies during auto-fix validation"
+          rm -f "$prompt_file" "$last_msg" "$validation_output_file" "$fix_prompt_file" "$fix_msg_file"
+          return 1
+        fi
       fi
 
       rm -f "$fix_prompt_file" "$fix_msg_file"
@@ -300,7 +330,7 @@ PY
   if [[ "$validation_ok" == "0" ]]; then
     python3 "$TASKCTL" mark "$PRD_FILE" "$id" "failed" "validation failed; see logs/run.log"
     log_event "Task $id failed validation"
-    rm -f "$prompt_file" "$last_msg"
+    rm -f "$prompt_file" "$last_msg" "$validation_output_file"
     return 1
   fi
 
@@ -327,7 +357,7 @@ PY
     fi
   fi
 
-  rm -f "$prompt_file" "$last_msg"
+  rm -f "$prompt_file" "$last_msg" "$validation_output_file"
   return 0
 }
 
@@ -350,7 +380,7 @@ if [[ "$STATUS_MILESTONES" == "1" ]]; then
   exit 0
 fi
 
-log_event "Runner start: model=$MODEL reasoning_effort=${REASONING_EFFORT:-default} sandbox=$SANDBOX search=$USE_SEARCH dry_run=$DRY_RUN max_iterations=$MAX_ITERATIONS"
+log_event "Runner start: model=$MODEL reasoning_effort=${REASONING_EFFORT:-default} sandbox=$SANDBOX search=$USE_SEARCH dry_run=$DRY_RUN auto_fix=$AUTO_FIX_VALIDATION auto_block_env=$AUTO_BLOCK_ENV_FAILURE max_iterations=$MAX_ITERATIONS"
 
 iter=1
 while [[ "$iter" -le "$MAX_ITERATIONS" ]]; do

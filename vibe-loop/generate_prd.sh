@@ -175,6 +175,7 @@ Task Structure:
 * Assign priorities as ascending integers starting at 1 (TASK-001 has priority 1, etc.).
 * All tasks must have status set to "pending".
 * Each task must include: id, title, prompt, priority, status, depends_on, acceptance, validation.
+* If the project requires runtime dependencies (for example Python packages, Node modules, toolchains, containers), make the first task an environment-readiness task that verifies prerequisites and installs dependencies.
 
 Task Design:
 
@@ -207,6 +208,8 @@ Validation Commands:
 * Do not include placeholder or non-functional commands.
 * If using `python -c`, the inline snippet must be syntactically valid exactly as written.
 * Do not place block statements like `def`, `class`, `try`, `for`, `while`, or `if` after semicolons in `python -c` one-liners.
+* Do not use no-op validations such as `echo`, `true`, or `exit 0` as substitutes for real checks.
+* Do not redefine build/test scripts in task prompts purely to make validation pass.
 
 Consistency:
 
@@ -244,6 +247,7 @@ PROMPT_HEADER
 import datetime as dt
 import json
 import os
+import re
 import shlex
 import sys
 from typing import Any, Optional
@@ -304,6 +308,20 @@ def extract_python_c_snippet(command: str) -> Optional[str]:
 
     return None
 
+def looks_like_noop_validation(command: str) -> bool:
+    stripped = command.strip()
+    lowered = stripped.lower()
+
+    if lowered in {"true", ":", "exit 0"}:
+        return True
+
+    if re.fullmatch(r"echo(\s+.+)?", lowered):
+        # Bare echo-only command is not a meaningful validation.
+        if "|" not in stripped and "&&" not in stripped and ";" not in stripped:
+            return True
+
+    return False
+
 def validate_generated_tasks(prd: dict[str, Any]) -> None:
     for task in prd.get("tasks", []):
         task_id = str(task.get("id", "")).strip() or "<missing-id>"
@@ -314,6 +332,12 @@ def validate_generated_tasks(prd: dict[str, Any]) -> None:
         for index, command in enumerate(validations, start=1):
             if not isinstance(command, str) or not command.strip():
                 raise ValueError(f"task {task_id}: validation[{index}] must be a non-empty string")
+
+            if looks_like_noop_validation(command):
+                raise ValueError(
+                    f"task {task_id}: validation[{index}] appears to be a no-op check; "
+                    "use a real executable verification command"
+                )
 
             snippet = extract_python_c_snippet(command)
             if snippet is None:

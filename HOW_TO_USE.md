@@ -33,6 +33,128 @@ For remote bootstrap:
 - `tar`
 - `sha256sum`
 
+## Before Running Tasks: Choose One Environment Setup
+Vibe Runner executes validation commands from your project tasks.  
+If your project dependencies are not installed, tasks can fail even when code is correct.
+
+Use one of these three setups before running the loop.
+
+### Option A: Python `venv` (simple local setup)
+Best for: most local Python + frontend projects on one machine.
+
+Run from your target project root:
+
+```bash
+cd /path/to/your-project
+python3 -m venv .venv
+source .venv/bin/activate
+
+# install backend deps (example)
+pip install -r backend/requirements.txt
+
+# install frontend deps (example)
+cd frontend && npm install && cd ..
+```
+
+Why this helps:
+- Keeps project packages isolated from your system Python.
+- Makes Python validations predictable.
+
+Validation command style to prefer in PRD tasks:
+- `.venv/bin/python -m pytest ...`
+- `.venv/bin/python ...`
+
+### Option B: Conda environment (managed data-science friendly setup)
+Best for: teams already using Anaconda/Miniconda.
+
+Run from your target project root:
+
+```bash
+cd /path/to/your-project
+conda create -n agentic-workflow python=3.12 -y
+conda activate agentic-workflow
+
+# install backend deps (example)
+pip install -r backend/requirements.txt
+
+# install frontend deps (example)
+cd frontend && npm install && cd ..
+```
+
+Why this helps:
+- Reproducible named environment.
+- Easy reset/recreate when dependencies drift.
+
+Validation command style to prefer in PRD tasks:
+- `conda run -n agentic-workflow python -m pytest ...`
+- `conda run -n agentic-workflow python ...`
+
+### Option C: Docker / Compose (isolated, closest to deployment)
+Best for: minimizing host setup differences.
+
+Run from your target project root:
+
+```bash
+cd /path/to/your-project
+docker compose build
+docker compose up -d
+
+# example validations inside containers
+docker compose run --rm backend pytest -q
+docker compose run --rm frontend npm run build
+```
+
+Why this helps:
+- No dependency pollution on host machine.
+- Consistent tool versions for every run.
+
+Important:
+- If you use Docker for validation, write PRD validation commands to call `docker compose run ...` explicitly.
+- Otherwise runner will execute host commands and may fail due missing local dependencies.
+
+## Tell The Agent Which Environment You Use (`CODEX.md`)
+You can explicitly tell the implementation agent how to run checks in your project.
+
+File to edit in your target project:
+- `.codex/vibe-loop/CODEX.md`
+
+Why do this:
+- Removes guesswork for the agent.
+- Helps the agent run the same commands you would run manually.
+- Reduces “works on my machine” mismatches.
+
+Add one short section that matches your setup:
+
+Example for `venv`:
+```md
+## Project Environment
+- Use the Python virtual environment at `.venv`.
+- Run Python commands with `.venv/bin/python`.
+- Run tests with `.venv/bin/python -m pytest`.
+```
+
+Example for `conda`:
+```md
+## Project Environment
+- Use conda environment `agentic-workflow`.
+- Run Python commands with `conda run -n agentic-workflow python`.
+- Run tests with `conda run -n agentic-workflow python -m pytest`.
+```
+
+Example for `docker compose`:
+```md
+## Project Environment
+- Run backend validations in Docker.
+- Use `docker compose run --rm backend ...` for backend checks.
+- Use `docker compose run --rm frontend ...` for frontend checks.
+```
+
+Non-technical checklist:
+1. Pick one environment style (`venv`, `conda`, or `docker`).
+2. Make sure the setup commands complete successfully.
+3. Add matching instructions to `.codex/vibe-loop/CODEX.md`.
+4. Generate PRD and run the loop.
+
 ## Environment Variable Usage Patterns
 Use either style:
 
@@ -248,9 +370,12 @@ Environment variables:
   - Default: `0`.
 - `AUTO_FIX_VALIDATION`
   - `1` enables auto-fix pass after validation failure.
-  - Default: `1`.
+  - Default: `0` (strict mode).
 - `MAX_AUTO_FIX_ATTEMPTS`
   - Number of auto-fix attempts.
+  - Default: `1`.
+- `AUTO_BLOCK_ENV_FAILURE`
+  - `1` marks task `blocked` when validation fails due missing dependencies/tools/network.
   - Default: `1`.
 - `HALT=true`
   - Stops before starting next task.
@@ -293,11 +418,24 @@ AUTO_FIX_VALIDATION=0 ./runner.sh 1
 # allow up to 3 auto-fix attempts
 MAX_AUTO_FIX_ATTEMPTS=3 ./runner.sh 1
 
+# auto-block tasks when validation fails due environment/dependency issues
+AUTO_BLOCK_ENV_FAILURE=1 ./runner.sh 1
+
 # push branch automatically after successful commit
 AUTO_PUSH=1 ./runner.sh 1
 
 # combine multiple env vars for a tuned run
 MODEL=gpt-5.4 REASONING_EFFORT=high AUTO_FIX_VALIDATION=1 MAX_AUTO_FIX_ATTEMPTS=2 ./runner.sh 2 --search
+```
+
+Recommended strict production run:
+```bash
+MODEL=gpt-5.3-codex \
+REASONING_EFFORT=high \
+SANDBOX=workspace-write \
+AUTO_FIX_VALIDATION=0 \
+AUTO_BLOCK_ENV_FAILURE=1 \
+./runner.sh 9999
 ```
 
 ## 4) Task Controller CLI (`taskctl.py`)
