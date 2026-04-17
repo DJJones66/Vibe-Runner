@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOOP_ROOT="$SCRIPT_DIR"
 SCHEMA_FILE="$LOOP_ROOT/schemas/prd.schema.json"
 OUT_FILE="$LOOP_ROOT/prd.json"
+LAST_PRD_SOURCE_FILE="$LOOP_ROOT/.last_prd_source"
 
 MODEL="${MODEL:-gpt-5.4}"
 REASONING_EFFORT="${REASONING_EFFORT:-}"
@@ -145,6 +146,14 @@ archive_current_state() {
     return 0
   fi
 
+  if [[ -x "$LOOP_ROOT/archive_state.sh" ]]; then
+    (
+      cd "$LOOP_ROOT"
+      ./archive_state.sh --name prd-replace
+    )
+    return 0
+  fi
+
   if [[ ! -f "$LOOP_ROOT/prd.json" && ! -d "$LOOP_ROOT/reports" && ! -d "$LOOP_ROOT/logs" ]]; then
     return 0
   fi
@@ -177,6 +186,32 @@ build_source_text() {
     return
   fi
   cat "$INPUT_MD"
+}
+
+persist_last_prd_source() {
+  local repo_root="$1"
+  local abs_md
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    return 0
+  fi
+
+  if [[ -z "$INPUT_MD" ]]; then
+    rm -f "$LAST_PRD_SOURCE_FILE"
+    return 0
+  fi
+
+  if command -v realpath >/dev/null 2>&1; then
+    abs_md="$(realpath "$INPUT_MD")"
+  else
+    abs_md="$(cd "$(dirname "$INPUT_MD")" && pwd)/$(basename "$INPUT_MD")"
+  fi
+
+  if [[ -n "$repo_root" && "$abs_md" == "$repo_root/"* ]]; then
+    printf '%s\n' "${abs_md#$repo_root/}" >"$LAST_PRD_SOURCE_FILE"
+  else
+    printf '%s\n' "$abs_md" >"$LAST_PRD_SOURCE_FILE"
+  fi
 }
 
 main() {
@@ -254,6 +289,8 @@ Validation Commands:
 * Use common, widely available tools (bash, python, node, curl, pytest, etc.).
 * Commands must be realistic and runnable in a standard development environment.
 * Do not include placeholder or non-functional commands.
+* Do not require project-specific CLI binaries via `command -v <tool>` unless that CLI is already defined by this repository's existing command surface.
+* For project-specific functionality, prefer direct repo-native execution (for example `python -m ...`, `python -c ...`, `node path/to/script`, or `./scripts/...`) over custom global CLI assumptions.
 * If using `python -c`, the inline snippet must be syntactically valid exactly as written.
 * Do not place block statements like `def`, `class`, `try`, `for`, `while`, or `if` after semicolons in `python -c` one-liners.
 * Do not use no-op validations such as `echo`, `true`, or `exit 0` as substitutes for real checks.
@@ -293,7 +330,7 @@ PROMPT_HEADER
 
   archive_current_state
 
-  python3 - "$last_msg" "$OUT_FILE" "$MODE" "$DRY_RUN" >"$normalized_out" <<'PY'
+  python3 - "$last_msg" "$OUT_FILE" "$MODE" "$DRY_RUN" "$repo_root" >"$normalized_out" <<'PY'
 import datetime as dt
 import json
 import os
@@ -302,7 +339,37 @@ import shlex
 import sys
 from typing import Any, Optional
 
-generated_path, out_path, mode, dry_run = sys.argv[1:5]
+generated_path, out_path, mode, dry_run, repo_root = sys.argv[1:6]
+repo_root = os.path.abspath(repo_root)
+
+COMMON_COMMAND_V_TOOLS = {
+    "bash",
+    "sh",
+    "python",
+    "python3",
+    "pip",
+    "pip3",
+    "node",
+    "npm",
+    "npx",
+    "pnpm",
+    "yarn",
+    "pytest",
+    "uv",
+    "git",
+    "curl",
+    "jq",
+    "make",
+    "docker",
+    "docker-compose",
+    "go",
+    "java",
+    "javac",
+    "ruby",
+    "bundle",
+    "cargo",
+    "rustc",
+}
 
 def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
@@ -310,6 +377,77 @@ def now_iso() -> str:
 def load_json(path: str) -> Any:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+def discover_repo_cli_names(root: str) -> set[str]:
+    names: set[str] = set()
+
+    if not os.path.isdir(root):
+        return names
+
+    candidate_dirs = [
+        "scripts",
+        "bin",
+        ".codex/vibe-loop/bin",
+    ]
+    for rel_dir in candidate_dirs:
+        abs_dir = os.path.join(root, rel_dir)
+        if not os.path.isdir(abs_dir):
+            continue
+        for entry in os.listdir(abs_dir):
+            abs_path = os.path.join(abs_dir, entry)
+            if not os.path.isfile(abs_path):
+                continue
+            names.add(entry)
+            stem, ext = os.path.splitext(entry)
+            if ext in {".sh", ".py", ".bash"} and stem:
+                names.add(stem)
+
+    for entry in os.listdir(root):
+        abs_path = os.path.join(root, entry)
+        if os.path.isfile(abs_path) and os.access(abs_path, os.X_OK):
+            names.add(entry)
+            stem, ext = os.path.splitext(entry)
+            if ext in {".sh", ".py", ".bash"} and stem:
+                names.add(stem)
+
+    pyproject_path = os.path.join(root, "pyproject.toml")
+    if os.path.isfile(pyproject_path):
+        try:
+            import tomllib  # Python 3.11+
+
+            with open(pyproject_path, "rb") as f:
+                pyproject = tomllib.load(f)
+            project_scripts = pyproject.get("project", {}).get("scripts", {})
+            if isinstance(project_scripts, dict):
+                for key in project_scripts.keys():
+                    if isinstance(key, str) and key.strip():
+                        names.add(key.strip())
+            poetry_scripts = pyproject.get("tool", {}).get("poetry", {}).get("scripts", {})
+            if isinstance(poetry_scripts, dict):
+                for key in poetry_scripts.keys():
+                    if isinstance(key, str) and key.strip():
+                        names.add(key.strip())
+        except Exception:
+            pass
+
+    package_json_path = os.path.join(root, "package.json")
+    if os.path.isfile(package_json_path):
+        try:
+            with open(package_json_path, "r", encoding="utf-8") as f:
+                package_data = json.load(f)
+            bin_field = package_data.get("bin")
+            if isinstance(bin_field, str):
+                package_name = package_data.get("name")
+                if isinstance(package_name, str) and package_name.strip():
+                    names.add(package_name.split("/")[-1])
+            elif isinstance(bin_field, dict):
+                for key in bin_field.keys():
+                    if isinstance(key, str) and key.strip():
+                        names.add(key.strip())
+        except Exception:
+            pass
+
+    return names
 
 def normalize(prd: dict[str, Any]) -> dict[str, Any]:
     prd.setdefault("project", "Vibe Runner Backlog")
@@ -358,6 +496,39 @@ def extract_python_c_snippet(command: str) -> Optional[str]:
 
     return None
 
+def extract_bash_lc_inner(command: str) -> Optional[str]:
+    m_single = re.match(r"^\s*bash\s+-lc\s+'(.*)'\s*$", command, flags=re.DOTALL)
+    if m_single:
+        return m_single.group(1)
+    m_double = re.match(r'^\s*bash\s+-lc\s+"(.*)"\s*$', command, flags=re.DOTALL)
+    if m_double:
+        return m_double.group(1)
+    return None
+
+def extract_command_v_target(command: str) -> Optional[str]:
+    subject = extract_bash_lc_inner(command)
+    if subject is None:
+        subject = command
+
+    try:
+        parts = shlex.split(subject, posix=True)
+    except ValueError as exc:
+        raise ValueError(f"invalid shell quoting in validation command: {exc}") from exc
+
+    for idx, token in enumerate(parts):
+        if token != "command":
+            continue
+        if idx + 2 >= len(parts):
+            continue
+        if parts[idx + 1] != "-v":
+            continue
+        target = parts[idx + 2].strip()
+        if not target or target.startswith("-"):
+            continue
+        return os.path.basename(target)
+
+    return None
+
 def looks_like_noop_validation(command: str) -> bool:
     stripped = command.strip()
     lowered = stripped.lower()
@@ -372,7 +543,7 @@ def looks_like_noop_validation(command: str) -> bool:
 
     return False
 
-def validate_generated_tasks(prd: dict[str, Any]) -> None:
+def validate_generated_tasks(prd: dict[str, Any], known_repo_clis: set[str]) -> None:
     for task in prd.get("tasks", []):
         task_id = str(task.get("id", "")).strip() or "<missing-id>"
         validations = task.get("validation", [])
@@ -389,6 +560,15 @@ def validate_generated_tasks(prd: dict[str, Any]) -> None:
                     "use a real executable verification command"
                 )
 
+            command_v_target = extract_command_v_target(command)
+            if command_v_target:
+                if command_v_target not in COMMON_COMMAND_V_TOOLS and command_v_target not in known_repo_clis:
+                    raise ValueError(
+                        f"task {task_id}: validation[{index}] checks custom CLI '{command_v_target}' with "
+                        "`command -v`, but it is not discoverable from this repository. "
+                        "Prefer repo-native execution (python -m/python -c/./scripts/*), or validate a known tool."
+                    )
+
             snippet = extract_python_c_snippet(command)
             if snippet is None:
                 continue
@@ -402,7 +582,8 @@ def validate_generated_tasks(prd: dict[str, Any]) -> None:
                 ) from exc
 
 generated = normalize(load_json(generated_path))
-validate_generated_tasks(generated)
+known_repo_clis = discover_repo_cli_names(repo_root)
+validate_generated_tasks(generated, known_repo_clis)
 
 if mode == "append" and os.path.exists(out_path):
     existing = normalize(load_json(out_path))
@@ -432,6 +613,7 @@ else:
 PY
 
   cat "$normalized_out"
+  persist_last_prd_source "$repo_root"
   rm -f "$prompt_file" "$last_msg" "$normalized_out"
 }
 

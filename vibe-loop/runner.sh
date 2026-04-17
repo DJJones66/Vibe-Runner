@@ -17,6 +17,8 @@ REASONING_EFFORT="${REASONING_EFFORT:-}"
 SANDBOX="${SANDBOX:-workspace-write}"
 AUTO_PUSH="${AUTO_PUSH:-0}"
 RESET_DIVERGED_TASK_BRANCH="${RESET_DIVERGED_TASK_BRANCH:-0}"
+ALLOW_DIRTY_LOOP_FILES="${ALLOW_DIRTY_LOOP_FILES:-0}"
+PREP_RESET_TASK_BRANCHES="${PREP_RESET_TASK_BRANCHES:-0}"
 USE_SEARCH=0
 AUTO_FIX_VALIDATION="${AUTO_FIX_VALIDATION:-0}"
 MAX_AUTO_FIX_ATTEMPTS="${MAX_AUTO_FIX_ATTEMPTS:-1}"
@@ -45,6 +47,7 @@ Options:
   --no-search      Disable web search for codex runs
   --search         Enable web search for codex runs (if supported by codex exec)
   --dry-run        Select tasks and log actions only (no codex execution)
+  --reset-task-branches  Reset local vibe/task-task-* branches to current HEAD before running
   --status         Print PRD status summary and exit
   --status-milestones  Print PRD milestone progress summary and exit
   -h, --help       Show this help
@@ -55,6 +58,8 @@ Environment:
   SANDBOX          Codex sandbox mode (default: workspace-write)
   AUTO_PUSH        1 to push branch after successful commit (default: 0)
   RESET_DIVERGED_TASK_BRANCH  1 to auto-reset an existing task branch to the current base if it diverged (default: 0)
+  ALLOW_DIRTY_LOOP_FILES  1 to allow dirty changes limited to .codex/vibe-loop/** (default: 0)
+  PREP_RESET_TASK_BRANCHES  1 to reset local vibe/task-task-* branches to current HEAD before running (default: 0)
   AUTO_FIX_VALIDATION  1 to let codex attempt one-pass fixes after validation fails (default: 0)
   MAX_AUTO_FIX_ATTEMPTS  Number of validation auto-fix attempts (default: 1)
   AUTO_BLOCK_ENV_FAILURE  1 to mark blocked when validation fails from missing env/deps (default: 1)
@@ -79,6 +84,10 @@ parse_args() {
         ;;
       --dry-run)
         DRY_RUN=1
+        shift
+        ;;
+      --reset-task-branches)
+        PREP_RESET_TASK_BRANCHES=1
         shift
         ;;
       --status)
@@ -119,15 +128,68 @@ supports_exec_search() {
 
 validation_indicates_env_block() {
   local output_file="$1"
-  grep -Eqi \
+  if grep -Eqi \
     'EAI_AGAIN|ENOTFOUND|Temporary failure in name resolution|Could not resolve host|network_access=false|command not found|vitest: not found|pytest: command not found|npm: command not found|node: command not found|python: command not found|python3: command not found|Cannot find module|Cannot find type definition file|ModuleNotFoundError|No module named' \
-    "$output_file"
+    "$output_file"; then
+    return 0
+  fi
+
+  # taskctl validate emits "Validation failed at step ...: <command>" even when
+  # command discovery checks like `command -v tool` produce no stderr text.
+  if grep -Eqi \
+    'Validation failed at step [0-9]+: .*command -v[[:space:]]+[[:alnum:]_.-]+' \
+    "$output_file"; then
+    return 0
+  fi
+
+  return 1
 }
 
 ensure_clean_git() {
+  if [[ "$ALLOW_DIRTY_LOOP_FILES" == "1" ]]; then
+    if ! git -C "$REPO_ROOT" diff --quiet -- . ":(exclude).codex/vibe-loop/**" || \
+       ! git -C "$REPO_ROOT" diff --cached --quiet -- . ":(exclude).codex/vibe-loop/**"; then
+      log_event "Working tree has non-loop changes. Commit/stash changes before running loop."
+      exit 1
+    fi
+    if ! git -C "$REPO_ROOT" diff --quiet || ! git -C "$REPO_ROOT" diff --cached --quiet; then
+      log_event "Working tree has .codex/vibe-loop changes; continuing because ALLOW_DIRTY_LOOP_FILES=1."
+    fi
+    return 0
+  fi
+
   if ! git -C "$REPO_ROOT" diff --quiet || ! git -C "$REPO_ROOT" diff --cached --quiet; then
     log_event "Working tree is dirty. Commit/stash changes before running loop."
     exit 1
+  fi
+}
+
+reset_task_branches_to_base() {
+  local base_ref base_short current branch reset_count failed_count
+  base_ref="$(git -C "$REPO_ROOT" rev-parse --verify HEAD)"
+  base_short="$(git -C "$REPO_ROOT" rev-parse --short "$base_ref")"
+  current="$(git -C "$REPO_ROOT" branch --show-current)"
+  reset_count=0
+  failed_count=0
+
+  while IFS= read -r branch; do
+    [[ -z "$branch" ]] && continue
+    [[ "$branch" == "$current" ]] && continue
+    if git -C "$REPO_ROOT" update-ref "refs/heads/$branch" "$base_ref"; then
+      reset_count=$((reset_count + 1))
+    else
+      failed_count=$((failed_count + 1))
+      log_event "Could not reset task branch '$branch' to base $base_short; continuing."
+    fi
+  done < <(git -C "$REPO_ROOT" for-each-ref --format='%(refname:short)' "refs/heads/vibe/task-task-*")
+
+  if [[ "$reset_count" -gt 0 ]]; then
+    log_event "Reset $reset_count task branches to base $base_short before run."
+  else
+    log_event "No existing task branches needed reset before run."
+  fi
+  if [[ "$failed_count" -gt 0 ]]; then
+    log_event "$failed_count task branches could not be reset automatically."
   fi
 }
 
@@ -438,7 +500,11 @@ if [[ "$STATUS_MILESTONES" == "1" ]]; then
   exit 0
 fi
 
-log_event "Runner start: model=$MODEL reasoning_effort=${REASONING_EFFORT:-default} sandbox=$SANDBOX search=$USE_SEARCH dry_run=$DRY_RUN auto_fix=$AUTO_FIX_VALIDATION auto_block_env=$AUTO_BLOCK_ENV_FAILURE max_iterations=$MAX_ITERATIONS"
+log_event "Runner start: model=$MODEL reasoning_effort=${REASONING_EFFORT:-default} sandbox=$SANDBOX search=$USE_SEARCH dry_run=$DRY_RUN auto_fix=$AUTO_FIX_VALIDATION auto_block_env=$AUTO_BLOCK_ENV_FAILURE allow_dirty_loop=$ALLOW_DIRTY_LOOP_FILES prep_reset_branches=$PREP_RESET_TASK_BRANCHES max_iterations=$MAX_ITERATIONS"
+
+if [[ "$PREP_RESET_TASK_BRANCHES" == "1" ]]; then
+  reset_task_branches_to_base
+fi
 
 iter=1
 while [[ "$iter" -le "$MAX_ITERATIONS" ]]; do

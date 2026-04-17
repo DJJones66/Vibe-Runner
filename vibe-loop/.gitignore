@@ -2,3 +2,6 @@ __pycache__/
 logs/*.log
 HALT
 *.tmp
+archive/
+.last_prd_source
+bin/

@@ -353,6 +353,9 @@ Options:
   - Enables Codex web search flag (only if `codex exec` supports `--search`).
 - `--dry-run`
   - Selects/logs tasks but does not run `codex exec`.
+- `--reset-task-branches`
+  - Resets local `vibe/task-task-*` branches to current `HEAD` before task execution.
+  - Useful after clearing/archive cycles or task-plan rewrites.
 - `--status`
   - Prints task status summary and exits.
 - `--status-milestones`
@@ -377,6 +380,14 @@ Environment variables:
 - `RESET_DIVERGED_TASK_BRANCH`
   - `1` auto-resets an existing task branch to the current base commit if it diverged.
   - `0` fails fast on divergence and logs guidance (safer default).
+  - Default: `0`.
+- `ALLOW_DIRTY_LOOP_FILES`
+  - `1` allows dirty changes only under `.codex/vibe-loop/**` and still blocks other dirty repo changes.
+  - Helps when loop scripts were updated but product code is clean.
+  - Default: `0`.
+- `PREP_RESET_TASK_BRANCHES`
+  - `1` resets local `vibe/task-task-*` branches to current `HEAD` before starting the loop.
+  - Equivalent to passing `--reset-task-branches`.
   - Default: `0`.
 - `AUTO_FIX_VALIDATION`
   - `1` enables auto-fix pass after validation failure.
@@ -412,6 +423,9 @@ REASONING_EFFORT=high ./runner.sh 1
 
 # dry run
 ./runner.sh 2 --dry-run
+
+# reset task branches to current HEAD before running
+./runner.sh --reset-task-branches 9999
 ```
 
 More examples:
@@ -436,6 +450,12 @@ AUTO_PUSH=1 ./runner.sh 1
 
 # auto-reset an existing task branch when it diverged from current base
 RESET_DIVERGED_TASK_BRANCH=1 ./runner.sh --task TASK-010 1
+
+# allow loop-script updates without committing .codex changes first
+ALLOW_DIRTY_LOOP_FILES=1 ./runner.sh 1
+
+# pre-reset all local task branches before long run
+PREP_RESET_TASK_BRANCHES=1 ./runner.sh 9999
 
 # combine multiple env vars for a tuned run
 MODEL=gpt-5.4 REASONING_EFFORT=high AUTO_FIX_VALIDATION=1 MAX_AUTO_FIX_ATTEMPTS=2 ./runner.sh 2 --search
@@ -553,6 +573,7 @@ Path in target project:
 Purpose:
 - Converts either inline prompt text or a markdown spec into a valid `prd.json` using `codex exec`.
 - Enforces JSON shape using `.codex/vibe-loop/schemas/prd.schema.json`.
+- Rejects risky validation patterns that assume unknown custom CLI binaries (for example `command -v <custom-tool>`) unless they are discoverable from repo command surfaces.
 
 Usage:
 ```bash
@@ -565,6 +586,7 @@ Input options (choose one):
   - Generate PRD from inline text.
 - `--from-md <file.md>`
   - Generate PRD from markdown file content.
+  - The source markdown path is remembered for later archive snapshots.
 
 Other options:
 - `--out <path>`
@@ -576,7 +598,7 @@ Other options:
   - `append`: append generated tasks into existing PRD.
   - In `append`, script fails if generated task IDs already exist.
 - `--archive-state`
-  - Archive existing loop state before `replace`.
+  - Archive existing loop state before `replace` (uses `archive_state.sh` behavior).
 - `--no-archive-state`
   - Disable archival before `replace` (default).
 - `--search`
@@ -633,6 +655,8 @@ Purpose:
 - Creates:
   - `.codex/vibe-loop/archive/<timestamp>/`
   - and copies `prd.json`, `reports/`, `logs/` when present.
+  - and copies source plan markdown when discoverable (last `--from-md` source + common root names like `agent_import.md`, `plan.md`).
+  - writes `manifest.txt` with timestamp + git context for later investigation.
 
 Usage:
 ```bash
@@ -647,8 +671,19 @@ Options:
 - `--dry-run`
   - Show what would be archived without writing files.
 - `--clear-after-archive`
-  - After successful archive copy, clears live `.codex/vibe-loop/logs/`.
-  - Useful when you want the next run to start with fresh logs.
+  - After successful archive copy, clears live loop artifacts:
+  - `.codex/vibe-loop/prd.json`
+  - `.codex/vibe-loop/reports/`
+  - `.codex/vibe-loop/logs/`
+  - `.codex/vibe-loop/HALT`
+  - `.codex/vibe-loop/.last_prd_source`
+  - Also resets local `vibe/task-task-*` branches to current `HEAD` by default.
+  - Useful when you want a true fresh slate before generating the next plan.
+- `--reset-task-branches`
+  - Resets local `vibe/task-task-*` branches to current `HEAD`.
+  - Can be used with or without `--clear-after-archive`.
+- `--no-reset-task-branches`
+  - Disables branch reset even when using `--clear-after-archive`.
 - `-h`, `--help`
   - Show help text.
 
@@ -663,8 +698,14 @@ Examples:
 # preview only
 ./archive_state.sh --dry-run
 
-# archive and clear live logs afterward
+# archive and clear live loop artifacts afterward
 ./archive_state.sh --clear-after-archive
+
+# archive, clear, but keep existing task branches untouched
+./archive_state.sh --clear-after-archive --no-reset-task-branches
+
+# only normalize task branches to current HEAD (no archive clear)
+./archive_state.sh --reset-task-branches
 ```
 
 ## 8) `prd.json` Task Expectations
