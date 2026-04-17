@@ -378,9 +378,10 @@ Environment variables:
   - `1` pushes branch after successful commit.
   - Default: `0`.
 - `RESET_DIVERGED_TASK_BRANCH`
-  - `1` auto-resets an existing task branch to the current base commit if it diverged.
+  - `1` auto-resets an existing task branch to the current base commit if it truly diverged.
   - `0` fails fast on divergence and logs guidance (safer default).
   - Default: `0`.
+  - Note: branches that are only behind current base (no unique commits) are auto-reset automatically.
 - `ALLOW_DIRTY_LOOP_FILES`
   - `1` allows dirty changes only under `.codex/vibe-loop/**` and still blocks other dirty repo changes.
   - Helps when loop scripts were updated but product code is clean.
@@ -403,6 +404,7 @@ Environment variables:
 
 Additional stop control:
 - Creating `.codex/vibe-loop/HALT` also stops the loop.
+- Pressing `Ctrl+C` during `codex exec` stops the loop and marks the in-flight task as `retry` (not `failed`) so it is safe to rerun.
 
 Common examples:
 ```bash

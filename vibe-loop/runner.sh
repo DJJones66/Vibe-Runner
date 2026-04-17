@@ -28,6 +28,7 @@ STATUS_ONLY=0
 STATUS_MILESTONES=0
 TASK_ID=""
 MAX_ITERATIONS=1
+INTERRUPTED=0
 
 mkdir -p "$LOG_DIR" "$REPORT_DIR"
 
@@ -36,6 +37,10 @@ log_event() {
   local ts
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   echo "[$ts] $msg" | tee -a "$EVENT_LOG"
+}
+
+on_interrupt() {
+  INTERRUPTED=1
 }
 
 usage() {
@@ -250,6 +255,11 @@ checkout_task_branch() {
   if git -C "$REPO_ROOT" rev-parse --verify "$branch" >/dev/null 2>&1; then
     if git -C "$REPO_ROOT" merge-base --is-ancestor "$base_ref" "$branch"; then
       git -C "$REPO_ROOT" checkout "$branch" >>"$RUN_LOG" 2>&1
+    elif git -C "$REPO_ROOT" merge-base --is-ancestor "$branch" "$base_ref"; then
+      # Existing task branch is behind current base with no unique commits.
+      # Safe to fast-forward/reset to the new base.
+      log_event "Branch '$branch' is behind base $base_short; resetting branch to current base."
+      git -C "$REPO_ROOT" checkout -B "$branch" "$base_ref" >>"$RUN_LOG" 2>&1
     else
       if [[ "$RESET_DIVERGED_TASK_BRANCH" == "1" ]]; then
         log_event "Branch '$branch' diverged from base $base_short; resetting branch to current base."
@@ -337,6 +347,12 @@ run_one_task() {
 
   log_event "Running codex exec for $id"
   if ! "${cmd[@]}" - <"$prompt_file" >>"$RUN_LOG" 2>&1; then
+    if [[ "$INTERRUPTED" == "1" ]]; then
+      python3 "$TASKCTL" mark "$PRD_FILE" "$id" "retry" "interrupted by user during codex exec; safe to rerun" >>"$RUN_LOG" 2>&1 || true
+      log_event "Task $id interrupted by user during codex exec"
+      rm -f "$prompt_file" "$last_msg"
+      return 130
+    fi
     python3 "$TASKCTL" mark "$PRD_FILE" "$id" "failed" "codex exec failed; see logs/run.log" >>"$RUN_LOG" 2>&1
     log_event "Task $id failed during codex exec"
     rm -f "$prompt_file" "$last_msg"
@@ -414,6 +430,12 @@ PY
       fi
 
       if ! "${fix_cmd[@]}" - <"$fix_prompt_file" >>"$RUN_LOG" 2>&1; then
+        if [[ "$INTERRUPTED" == "1" ]]; then
+          python3 "$TASKCTL" mark "$PRD_FILE" "$id" "retry" "interrupted by user during auto-fix; safe to rerun" >>"$RUN_LOG" 2>&1 || true
+          log_event "Task $id interrupted by user during auto-fix attempt $attempt"
+          rm -f "$prompt_file" "$last_msg" "$validation_output_file" "$fix_prompt_file" "$fix_msg_file"
+          return 130
+        fi
         log_event "Auto-fix codex exec failed for $id on attempt $attempt"
       else
         {
@@ -479,6 +501,7 @@ PY
 
 parse_args "$@"
 require_tools
+trap on_interrupt INT TERM
 
 REPO_ROOT="$(git -C "$LOOP_ROOT" rev-parse --show-toplevel 2>/dev/null || true)"
 if [[ -z "$REPO_ROOT" ]]; then
@@ -508,6 +531,11 @@ fi
 
 iter=1
 while [[ "$iter" -le "$MAX_ITERATIONS" ]]; do
+  if [[ "$INTERRUPTED" == "1" ]]; then
+    log_event "Interrupt requested. Stopping loop."
+    exit 130
+  fi
+
   if [[ "${HALT:-false}" == "true" || -f "$HALT_FILE" ]]; then
     log_event "HALT detected. Stopping loop."
     break
@@ -525,7 +553,14 @@ while [[ "$iter" -le "$MAX_ITERATIONS" ]]; do
     break
   fi
 
-  if ! run_one_task "$task_json"; then
+  if run_one_task "$task_json"; then
+    :
+  else
+    rc="$?"
+    if [[ "$rc" -eq 130 || "$INTERRUPTED" == "1" ]]; then
+      log_event "Stopping loop due to user interrupt."
+      exit 130
+    fi
     log_event "Stopping loop after failure."
     exit 1
   fi
