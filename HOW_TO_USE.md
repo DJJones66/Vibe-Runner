@@ -646,6 +646,9 @@ Options:
   - Example output dir: `archive/20260412-193000-plan-1/`
 - `--dry-run`
   - Show what would be archived without writing files.
+- `--clear-after-archive`
+  - After successful archive copy, clears live `.codex/vibe-loop/logs/`.
+  - Useful when you want the next run to start with fresh logs.
 - `-h`, `--help`
   - Show help text.
 
@@ -659,6 +662,9 @@ Examples:
 
 # preview only
 ./archive_state.sh --dry-run
+
+# archive and clear live logs afterward
+./archive_state.sh --clear-after-archive
 ```
 
 ## 8) `prd.json` Task Expectations

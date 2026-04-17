@@ -7,6 +7,7 @@ ARCHIVE_ROOT="$LOOP_ROOT/archive"
 
 ARCHIVE_NAME=""
 DRY_RUN=0
+CLEAR_AFTER_ARCHIVE=0
 
 usage() {
   cat <<USAGE
@@ -16,6 +17,7 @@ Usage:
 Options:
   --name <label>   Optional archive label suffix (example: plan-1)
   --dry-run        Print what would be archived without writing files
+  --clear-after-archive  Clear live logs/ after a successful archive
   -h, --help       Show this help
 
 Behavior:
@@ -38,6 +40,10 @@ parse_args() {
         ;;
       --dry-run)
         DRY_RUN=1
+        shift
+        ;;
+      --clear-after-archive)
+        CLEAR_AFTER_ARCHIVE=1
         shift
         ;;
       -h|--help)
@@ -85,6 +91,9 @@ main() {
     [[ -f "$LOOP_ROOT/prd.json" ]] && echo "Would copy: $LOOP_ROOT/prd.json"
     [[ -d "$LOOP_ROOT/reports" ]] && echo "Would copy: $LOOP_ROOT/reports/"
     [[ -d "$LOOP_ROOT/logs" ]] && echo "Would copy: $LOOP_ROOT/logs/"
+    if [[ "$CLEAR_AFTER_ARCHIVE" == "1" ]]; then
+      echo "Would clear: $LOOP_ROOT/logs/"
+    fi
     exit 0
   fi
 
@@ -98,6 +107,11 @@ main() {
   fi
   if [[ -d "$LOOP_ROOT/logs" ]]; then
     cp -a "$LOOP_ROOT/logs" "$archive_dir/logs"
+  fi
+
+  if [[ "$CLEAR_AFTER_ARCHIVE" == "1" && -d "$LOOP_ROOT/logs" ]]; then
+    rm -rf "$LOOP_ROOT/logs"
+    mkdir -p "$LOOP_ROOT/logs"
   fi
 
   echo "Archived loop state: $archive_dir"
