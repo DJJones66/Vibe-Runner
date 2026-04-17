@@ -16,6 +16,7 @@ MODEL="${MODEL:-gpt-5.4}"
 REASONING_EFFORT="${REASONING_EFFORT:-}"
 SANDBOX="${SANDBOX:-workspace-write}"
 AUTO_PUSH="${AUTO_PUSH:-0}"
+RESET_DIVERGED_TASK_BRANCH="${RESET_DIVERGED_TASK_BRANCH:-0}"
 USE_SEARCH=0
 AUTO_FIX_VALIDATION="${AUTO_FIX_VALIDATION:-0}"
 MAX_AUTO_FIX_ATTEMPTS="${MAX_AUTO_FIX_ATTEMPTS:-1}"
@@ -53,6 +54,7 @@ Environment:
   REASONING_EFFORT Optional reasoning effort passed via codex config override
   SANDBOX          Codex sandbox mode (default: workspace-write)
   AUTO_PUSH        1 to push branch after successful commit (default: 0)
+  RESET_DIVERGED_TASK_BRANCH  1 to auto-reset an existing task branch to the current base if it diverged (default: 0)
   AUTO_FIX_VALIDATION  1 to let codex attempt one-pass fixes after validation fails (default: 0)
   MAX_AUTO_FIX_ATTEMPTS  Number of validation auto-fix attempts (default: 1)
   AUTO_BLOCK_ENV_FAILURE  1 to mark blocked when validation fails from missing env/deps (default: 1)
@@ -129,11 +131,27 @@ ensure_clean_git() {
   fi
 }
 
+ensure_loop_control_files() {
+  local required
+  local missing=0
+  for required in "$TASKCTL" "$PRD_FILE" "$CODEX_MD"; do
+    if [[ ! -f "$required" ]]; then
+      log_event "Missing required loop file: $required"
+      missing=1
+    fi
+  done
+  if [[ "$missing" -ne 0 ]]; then
+    log_event "Loop control files are missing. A checked-out task branch likely removed .codex/vibe-loop."
+    return 1
+  fi
+  return 0
+}
+
 get_task_json() {
   if [[ -n "$TASK_ID" ]]; then
-    python3 "$TASKCTL" next "$PRD_FILE" --task "$TASK_ID"
+    python3 "$TASKCTL" next "$PRD_FILE" --task "$TASK_ID" 2>>"$RUN_LOG"
   else
-    python3 "$TASKCTL" next "$PRD_FILE"
+    python3 "$TASKCTL" next "$PRD_FILE" 2>>"$RUN_LOG"
   fi
 }
 
@@ -157,23 +175,45 @@ PY
 
 checkout_task_branch() {
   local branch="$1"
+  local base_ref="$2"
   local current
+  local base_short
   current="$(git -C "$REPO_ROOT" branch --show-current)"
+  base_short="$(git -C "$REPO_ROOT" rev-parse --short "$base_ref")"
 
   if [[ "$current" == "$branch" ]]; then
     return 0
   fi
 
   if git -C "$REPO_ROOT" rev-parse --verify "$branch" >/dev/null 2>&1; then
-    git -C "$REPO_ROOT" checkout "$branch" >>"$RUN_LOG" 2>&1
+    if git -C "$REPO_ROOT" merge-base --is-ancestor "$base_ref" "$branch"; then
+      git -C "$REPO_ROOT" checkout "$branch" >>"$RUN_LOG" 2>&1
+    else
+      if [[ "$RESET_DIVERGED_TASK_BRANCH" == "1" ]]; then
+        log_event "Branch '$branch' diverged from base $base_short; resetting branch to current base."
+        git -C "$REPO_ROOT" checkout -B "$branch" "$base_ref" >>"$RUN_LOG" 2>&1
+      else
+        log_event "Branch '$branch' diverged from base $base_short; refusing checkout (set RESET_DIVERGED_TASK_BRANCH=1 to auto-reset)."
+        return 1
+      fi
+    fi
   else
-    git -C "$REPO_ROOT" checkout -b "$branch" >>"$RUN_LOG" 2>&1
+    git -C "$REPO_ROOT" checkout -b "$branch" "$base_ref" >>"$RUN_LOG" 2>&1
   fi
+}
+
+stage_repo_changes() {
+  if [[ -z "$(git -C "$REPO_ROOT" ls-files ".codex/**")" ]]; then
+    git -C "$REPO_ROOT" add -A -- . ":(exclude).codex/**" >>"$RUN_LOG" 2>&1
+    return 0
+  fi
+  log_event "Tracked .codex files detected; using legacy staging for compatibility."
+  git -C "$REPO_ROOT" add -A >>"$RUN_LOG" 2>&1
 }
 
 run_one_task() {
   local task_json="$1"
-  local id title branch report_rel report_abs
+  local id title branch report_rel report_abs base_ref
   id="$(extract_json_field "$task_json" "id")"
   title="$(extract_json_field "$task_json" "title")"
   branch="$(extract_json_field "$task_json" "branch")"
@@ -197,11 +237,25 @@ run_one_task() {
     return 0
   fi
 
-  checkout_task_branch "$branch"
+  base_ref="$(git -C "$REPO_ROOT" rev-parse --verify HEAD)"
+  if ! checkout_task_branch "$branch" "$base_ref"; then
+    python3 "$TASKCTL" mark "$PRD_FILE" "$id" "failed" "branch checkout failed; see logs/run.log" >>"$RUN_LOG" 2>&1 || true
+    log_event "Task $id failed during branch checkout"
+    return 1
+  fi
+  if ! ensure_loop_control_files; then
+    log_event "Task $id failed because required loop files were removed after checkout"
+    return 1
+  fi
 
   local prompt_file
   prompt_file="$(mktemp)"
-  python3 "$TASKCTL" render-prompt "$PRD_FILE" "$id" "$CODEX_MD" "$prompt_file"
+  if ! python3 "$TASKCTL" render-prompt "$PRD_FILE" "$id" "$CODEX_MD" "$prompt_file" >>"$RUN_LOG" 2>&1; then
+    python3 "$TASKCTL" mark "$PRD_FILE" "$id" "failed" "prompt render failed; see logs/run.log" >>"$RUN_LOG" 2>&1 || true
+    log_event "Task $id failed during prompt rendering"
+    rm -f "$prompt_file"
+    return 1
+  fi
 
   local last_msg
   last_msg="$(mktemp)"
@@ -221,7 +275,7 @@ run_one_task() {
 
   log_event "Running codex exec for $id"
   if ! "${cmd[@]}" - <"$prompt_file" >>"$RUN_LOG" 2>&1; then
-    python3 "$TASKCTL" mark "$PRD_FILE" "$id" "failed" "codex exec failed; see logs/run.log"
+    python3 "$TASKCTL" mark "$PRD_FILE" "$id" "failed" "codex exec failed; see logs/run.log" >>"$RUN_LOG" 2>&1
     log_event "Task $id failed during codex exec"
     rm -f "$prompt_file" "$last_msg"
     return 1
@@ -240,7 +294,7 @@ run_one_task() {
     cat "$validation_output_file" >>"$RUN_LOG"
     log_event "Task $id failed validation on first pass"
     if [[ "$AUTO_BLOCK_ENV_FAILURE" == "1" ]] && validation_indicates_env_block "$validation_output_file"; then
-      python3 "$TASKCTL" mark "$PRD_FILE" "$id" "blocked" "validation blocked by environment/dependencies; see logs/run.log"
+      python3 "$TASKCTL" mark "$PRD_FILE" "$id" "blocked" "validation blocked by environment/dependencies; see logs/run.log" >>"$RUN_LOG" 2>&1
       log_event "Task $id blocked by environment/dependencies during validation"
       rm -f "$prompt_file" "$last_msg" "$validation_output_file"
       return 1
@@ -249,7 +303,7 @@ run_one_task() {
 
   if [[ "$validation_ok" == "0" && "$AUTO_FIX_VALIDATION" == "1" ]]; then
     local validation_json
-    validation_json="$(python3 "$TASKCTL" field "$PRD_FILE" "$id" validation --json)"
+    validation_json="$(python3 "$TASKCTL" field "$PRD_FILE" "$id" validation --json 2>>"$RUN_LOG")"
     local attempt=1
     while [[ "$attempt" -le "$MAX_AUTO_FIX_ATTEMPTS" && "$validation_ok" == "0" ]]; do
       log_event "Auto-fix attempt $attempt for $id after validation failure"
@@ -315,7 +369,7 @@ PY
       else
         cat "$validation_output_file" >>"$RUN_LOG"
         if [[ "$AUTO_BLOCK_ENV_FAILURE" == "1" ]] && validation_indicates_env_block "$validation_output_file"; then
-          python3 "$TASKCTL" mark "$PRD_FILE" "$id" "blocked" "validation blocked by environment/dependencies; see logs/run.log"
+          python3 "$TASKCTL" mark "$PRD_FILE" "$id" "blocked" "validation blocked by environment/dependencies; see logs/run.log" >>"$RUN_LOG" 2>&1
           log_event "Task $id blocked by environment/dependencies during auto-fix validation"
           rm -f "$prompt_file" "$last_msg" "$validation_output_file" "$fix_prompt_file" "$fix_msg_file"
           return 1
@@ -328,16 +382,16 @@ PY
   fi
 
   if [[ "$validation_ok" == "0" ]]; then
-    python3 "$TASKCTL" mark "$PRD_FILE" "$id" "failed" "validation failed; see logs/run.log"
+    python3 "$TASKCTL" mark "$PRD_FILE" "$id" "failed" "validation failed; see logs/run.log" >>"$RUN_LOG" 2>&1
     log_event "Task $id failed validation"
     rm -f "$prompt_file" "$last_msg" "$validation_output_file"
     return 1
   fi
 
   # Mark done before commit so task-state updates are included in the same commit.
-  python3 "$TASKCTL" mark "$PRD_FILE" "$id" "done" "report=$report_rel"
+  python3 "$TASKCTL" mark "$PRD_FILE" "$id" "done" "report=$report_rel" >>"$RUN_LOG" 2>&1
 
-  git -C "$REPO_ROOT" add -A >>"$RUN_LOG" 2>&1
+  stage_repo_changes
   if git -C "$REPO_ROOT" diff --cached --quiet; then
     log_event "Task $id completed with no commit-able changes"
   else
@@ -350,7 +404,7 @@ PY
       fi
       log_event "Task $id completed and committed ($sha)"
     else
-      python3 "$TASKCTL" mark "$PRD_FILE" "$id" "failed" "commit failed; see logs/run.log"
+      python3 "$TASKCTL" mark "$PRD_FILE" "$id" "failed" "commit failed; see logs/run.log" >>"$RUN_LOG" 2>&1
       log_event "Task $id failed during commit"
       rm -f "$prompt_file" "$last_msg"
       return 1
@@ -370,13 +424,17 @@ if [[ -z "$REPO_ROOT" ]]; then
   exit 1
 fi
 
+if ! ensure_loop_control_files; then
+  exit 1
+fi
+
 if [[ "$STATUS_ONLY" == "1" ]]; then
-  python3 "$TASKCTL" summary "$PRD_FILE"
+  python3 "$TASKCTL" summary "$PRD_FILE" 2>>"$RUN_LOG" | tee -a "$RUN_LOG"
   exit 0
 fi
 
 if [[ "$STATUS_MILESTONES" == "1" ]]; then
-  python3 "$TASKCTL" milestones "$PRD_FILE"
+  python3 "$TASKCTL" milestones "$PRD_FILE" 2>>"$RUN_LOG" | tee -a "$RUN_LOG"
   exit 0
 fi
 
@@ -390,6 +448,10 @@ while [[ "$iter" -le "$MAX_ITERATIONS" ]]; do
   fi
 
   ensure_clean_git
+  if ! ensure_loop_control_files; then
+    log_event "Stopping loop because control files are missing."
+    exit 1
+  fi
 
   task_json="$(get_task_json)"
   if [[ -z "$task_json" ]]; then

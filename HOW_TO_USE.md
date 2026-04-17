@@ -374,6 +374,10 @@ Environment variables:
 - `AUTO_PUSH`
   - `1` pushes branch after successful commit.
   - Default: `0`.
+- `RESET_DIVERGED_TASK_BRANCH`
+  - `1` auto-resets an existing task branch to the current base commit if it diverged.
+  - `0` fails fast on divergence and logs guidance (safer default).
+  - Default: `0`.
 - `AUTO_FIX_VALIDATION`
   - `1` enables auto-fix pass after validation failure.
   - Default: `0` (strict mode).
@@ -429,6 +433,9 @@ AUTO_BLOCK_ENV_FAILURE=1 ./runner.sh 1
 
 # push branch automatically after successful commit
 AUTO_PUSH=1 ./runner.sh 1
+
+# auto-reset an existing task branch when it diverged from current base
+RESET_DIVERGED_TASK_BRANCH=1 ./runner.sh --task TASK-010 1
 
 # combine multiple env vars for a tuned run
 MODEL=gpt-5.4 REASONING_EFFORT=high AUTO_FIX_VALIDATION=1 MAX_AUTO_FIX_ATTEMPTS=2 ./runner.sh 2 --search
