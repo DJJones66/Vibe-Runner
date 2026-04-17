@@ -3,6 +3,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import subprocess
 import sys
 from typing import Any, Dict, List, Optional
@@ -222,7 +223,15 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
     for idx, command in enumerate(commands, start=1):
         print(f"[validate {idx}/{len(commands)}] {command}")
-        result = subprocess.run(command, shell=True, cwd=repo_root)
+        # Preserve inner quotes for bash -lc '...'-style validations.
+        m_single = re.match(r"^\s*bash\s+-lc\s+'(.*)'\s*$", command, flags=re.DOTALL)
+        m_double = re.match(r'^\s*bash\s+-lc\s+"(.*)"\s*$', command, flags=re.DOTALL)
+        if m_single:
+            result = subprocess.run(["bash", "-lc", m_single.group(1)], cwd=repo_root)
+        elif m_double:
+            result = subprocess.run(["bash", "-lc", m_double.group(1)], cwd=repo_root)
+        else:
+            result = subprocess.run(command, shell=True, cwd=repo_root)
         if result.returncode != 0:
             print(
                 f"Validation failed at step {idx}: {command}",

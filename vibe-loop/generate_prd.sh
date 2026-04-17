@@ -11,6 +11,7 @@ REASONING_EFFORT="${REASONING_EFFORT:-}"
 SANDBOX="${SANDBOX:-workspace-write}"
 USE_SEARCH=0
 MODE="replace"
+ARCHIVE_ON_REPLACE="${ARCHIVE_ON_REPLACE:-0}"
 DRY_RUN=0
 INPUT_PROMPT=""
 INPUT_MD=""
@@ -29,6 +30,8 @@ Options:
   --mode <replace|append>
                          replace: overwrite output PRD
                          append: append generated tasks into existing PRD (fails on duplicate ids)
+  --archive-state        Archive existing prd/reports/logs before replace
+  --no-archive-state     Disable archival before replace (default)
   --search               Enable web search for codex exec (if supported)
   --no-search            Disable web search for codex exec (default)
   --dry-run              Print generated PRD JSON to stdout without writing file
@@ -38,6 +41,7 @@ Environment:
   MODEL                  Codex model (default: gpt-5.4)
   REASONING_EFFORT       Optional reasoning effort (low|medium|high, model-dependent)
   SANDBOX                Codex sandbox mode (default: workspace-write)
+  ARCHIVE_ON_REPLACE     1 to archive existing loop state before replace (default: 0)
 USAGE
 }
 
@@ -59,6 +63,14 @@ parse_args() {
       --mode)
         MODE="$2"
         shift 2
+        ;;
+      --archive-state)
+        ARCHIVE_ON_REPLACE=1
+        shift
+        ;;
+      --no-archive-state)
+        ARCHIVE_ON_REPLACE=0
+        shift
         ;;
       --search)
         USE_SEARCH=1
@@ -117,10 +129,46 @@ validate_inputs() {
     exit 2
   fi
 
+  if [[ "$ARCHIVE_ON_REPLACE" != "0" && "$ARCHIVE_ON_REPLACE" != "1" ]]; then
+    echo "Invalid ARCHIVE_ON_REPLACE value: $ARCHIVE_ON_REPLACE (expected 0 or 1)" >&2
+    exit 2
+  fi
+
   if [[ ! -f "$SCHEMA_FILE" ]]; then
     echo "Schema file missing: $SCHEMA_FILE" >&2
     exit 1
   fi
+}
+
+archive_current_state() {
+  if [[ "$MODE" != "replace" || "$DRY_RUN" == "1" || "$ARCHIVE_ON_REPLACE" != "1" ]]; then
+    return 0
+  fi
+
+  if [[ ! -f "$LOOP_ROOT/prd.json" && ! -d "$LOOP_ROOT/reports" && ! -d "$LOOP_ROOT/logs" ]]; then
+    return 0
+  fi
+
+  local ts archive_dir
+  ts="$(date -u +"%Y%m%d-%H%M%S")"
+  archive_dir="$LOOP_ROOT/archive/$ts"
+  if [[ -e "$archive_dir" ]]; then
+    archive_dir="${archive_dir}-$$"
+  fi
+
+  mkdir -p "$archive_dir"
+
+  if [[ -f "$LOOP_ROOT/prd.json" ]]; then
+    cp "$LOOP_ROOT/prd.json" "$archive_dir/prd.json"
+  fi
+  if [[ -d "$LOOP_ROOT/reports" ]]; then
+    cp -a "$LOOP_ROOT/reports" "$archive_dir/reports"
+  fi
+  if [[ -d "$LOOP_ROOT/logs" ]]; then
+    cp -a "$LOOP_ROOT/logs" "$archive_dir/logs"
+  fi
+
+  echo "Archived previous loop state: $archive_dir"
 }
 
 build_source_text() {
@@ -242,6 +290,8 @@ PROMPT_HEADER
     rm -f "$prompt_file" "$last_msg" "$normalized_out"
     exit 1
   fi
+
+  archive_current_state
 
   python3 - "$last_msg" "$OUT_FILE" "$MODE" "$DRY_RUN" >"$normalized_out" <<'PY'
 import datetime as dt

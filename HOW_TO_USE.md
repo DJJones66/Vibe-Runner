@@ -12,6 +12,8 @@ When installed into a target project, Vibe Runner is placed at:
 Installed files:
 - `runner.sh`
 - `taskctl.py`
+- `archive_state.sh`
+- `self_update.sh`
 - `CODEX.md`
 - `prd.json`
 - `logs/`
@@ -290,6 +292,10 @@ curl -fsSL https://raw.githubusercontent.com/<owner>/Vide-Runner/main/scripts/bo
 curl -fsSL https://raw.githubusercontent.com/<owner>/Vide-Runner/main/scripts/bootstrap.sh \
   | bash -s -- --action update --version v1.1.0 --checksum-url https://example.com/checksums.txt
 
+# update with the same unsigned style as install
+curl -fsSL https://raw.githubusercontent.com/DJJones66/Vibe-Runner/main/scripts/bootstrap.sh \
+  | bash -s -- --action update --allow-unsigned
+
 # uninstall
 curl -fsSL https://raw.githubusercontent.com/<owner>/Vide-Runner/main/scripts/bootstrap.sh \
   | bash -s -- --action uninstall
@@ -438,6 +444,27 @@ AUTO_BLOCK_ENV_FAILURE=1 \
 ./runner.sh 9999
 ```
 
+## Quick Update Command In Installed Projects
+Path in target project:
+- `.codex/vibe-loop/self_update.sh`
+
+Purpose:
+- Give you a simple in-project update command after initial bootstrap install.
+
+Usage from project root:
+```bash
+./.codex/vibe-loop/self_update.sh --allow-unsigned
+```
+
+Other examples:
+```bash
+# pinned update
+./.codex/vibe-loop/self_update.sh --version v1.2.3 --sha256 <sha256>
+
+# custom fork update
+./.codex/vibe-loop/self_update.sh --repo-url https://github.com/<your-org>/Vibe-Runner --allow-unsigned
+```
+
 ## 4) Task Controller CLI (`taskctl.py`)
 Path in target project:
 - `.codex/vibe-loop/taskctl.py`
@@ -538,8 +565,13 @@ Other options:
   - Default: `./prd.json`.
 - `--mode <replace|append>`
   - `replace`: overwrite output PRD with generated PRD.
+  - In `replace`, no archive is created unless you enable it with `--archive-state`.
   - `append`: append generated tasks into existing PRD.
   - In `append`, script fails if generated task IDs already exist.
+- `--archive-state`
+  - Archive existing loop state before `replace`.
+- `--no-archive-state`
+  - Disable archival before `replace` (default).
 - `--search`
   - Enable web search for codex exec (if supported by your CLI build).
 - `--no-search`
@@ -556,11 +588,18 @@ Environment variables:
   - Optional reasoning effort (`low`, `medium`, `high`, model-dependent).
 - `SANDBOX`
   - Codex sandbox mode (default: `workspace-write`).
+- `ARCHIVE_ON_REPLACE`
+  - `1` archives existing state before `replace`.
+  - `0` disables archive behavior.
+  - Default: `0`.
 
 Examples:
 ```bash
 # replace prd.json from a simple prompt
 ./generate_prd.sh --prompt "Build a SaaS billing backend MVP with auth, subscriptions, invoices, and webhooks."
+
+# replace from markdown and auto-archive previous run state
+./generate_prd.sh --from-md ./plan_1.md --mode replace --archive-state
 
 # generate from markdown spec into a new output file
 ./generate_prd.sh --from-md /path/to/PRODUCT_PLAN.md --out /tmp/new-prd.json
@@ -573,9 +612,49 @@ Examples:
 
 # run with explicit model + reasoning effort
 MODEL=gpt-5.4 REASONING_EFFORT=high ./generate_prd.sh --from-md /path/to/PRODUCT_PLAN.md
+
+# replace without archiving old state
+./generate_prd.sh --from-md ./plan_1.md --mode replace --no-archive-state
 ```
 
-## 7) `prd.json` Task Expectations
+## 7) Manual Archive Command (`archive_state.sh`)
+Path in target project:
+- `.codex/vibe-loop/archive_state.sh`
+
+Purpose:
+- Manually snapshot current loop state when you decide you are done reviewing a run.
+- Creates:
+  - `.codex/vibe-loop/archive/<timestamp>/`
+  - and copies `prd.json`, `reports/`, `logs/` when present.
+
+Usage:
+```bash
+cd .codex/vibe-loop
+./archive_state.sh [options]
+```
+
+Options:
+- `--name <label>`
+  - Optional label suffix for the archive directory.
+  - Example output dir: `archive/20260412-193000-plan-1/`
+- `--dry-run`
+  - Show what would be archived without writing files.
+- `-h`, `--help`
+  - Show help text.
+
+Examples:
+```bash
+# archive current state now
+./archive_state.sh
+
+# archive with a label
+./archive_state.sh --name plan-1
+
+# preview only
+./archive_state.sh --dry-run
+```
+
+## 8) `prd.json` Task Expectations
 `runner.sh` and `taskctl.py` expect a task list in `prd.json` with fields like:
 - `id`
 - `title`

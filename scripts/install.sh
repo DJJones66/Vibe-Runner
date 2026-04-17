@@ -35,6 +35,8 @@ install_or_update() {
 
   cp "$SRC_LOOP/runner.sh" "$DEST_LOOP/runner.sh"
   cp "$SRC_LOOP/generate_prd.sh" "$DEST_LOOP/generate_prd.sh"
+  cp "$SRC_LOOP/archive_state.sh" "$DEST_LOOP/archive_state.sh"
+  cp "$SRC_LOOP/self_update.sh" "$DEST_LOOP/self_update.sh"
   cp "$SRC_LOOP/taskctl.py" "$DEST_LOOP/taskctl.py"
   cp "$SRC_LOOP/schemas/prd.schema.json" "$DEST_LOOP/schemas/prd.schema.json"
   cp "$SRC_LOOP/.gitignore" "$DEST_LOOP/.gitignore"
@@ -42,10 +44,11 @@ install_or_update() {
   copy_if_needed "$SRC_LOOP/CODEX.md" "$DEST_LOOP/CODEX.md"
   copy_if_needed "$SRC_LOOP/prd.json" "$DEST_LOOP/prd.json"
 
-  chmod +x "$DEST_LOOP/runner.sh" "$DEST_LOOP/generate_prd.sh" "$DEST_LOOP/taskctl.py"
+  chmod +x "$DEST_LOOP/runner.sh" "$DEST_LOOP/generate_prd.sh" "$DEST_LOOP/archive_state.sh" "$DEST_LOOP/self_update.sh" "$DEST_LOOP/taskctl.py"
 
   echo "[vibe-runner] $ACTION complete"
   echo "target: $DEST_LOOP"
+  echo "tip: update later from target repo root with ./.codex/vibe-loop/self_update.sh --allow-unsigned"
   if [[ "$FORCE" != "1" ]]; then
     echo "note: existing CODEX.md/prd.json were preserved (set FORCE=1 to overwrite)"
   fi
