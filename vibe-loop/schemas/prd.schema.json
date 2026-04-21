@@ -27,7 +27,8 @@
       "type": "object",
       "required": [
         "base_branch",
-        "working_branch"
+        "working_branch",
+        "branch_strategy"
       ],
       "properties": {
         "base_branch": {
@@ -72,7 +73,8 @@
           "prompt",
           "acceptance",
           "validation",
-          "commit_message"
+          "commit_message",
+          "report"
         ],
         "properties": {
           "id": {
