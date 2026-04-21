@@ -188,6 +188,35 @@ build_source_text() {
   cat "$INPUT_MD"
 }
 
+detect_repo_base_branch() {
+  local repo_root="$1"
+  local branch
+
+  branch="$(git -C "$repo_root" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  branch="${branch#origin/}"
+  if [[ -n "$branch" ]]; then
+    echo "$branch"
+    return 0
+  fi
+
+  if git -C "$repo_root" rev-parse --verify main >/dev/null 2>&1; then
+    echo "main"
+    return 0
+  fi
+  if git -C "$repo_root" rev-parse --verify master >/dev/null 2>&1; then
+    echo "master"
+    return 0
+  fi
+
+  branch="$(git -C "$repo_root" branch --show-current)"
+  if [[ -n "$branch" ]]; then
+    echo "$branch"
+    return 0
+  fi
+
+  echo "main"
+}
+
 persist_last_prd_source() {
   local repo_root="$1"
   local abs_md
@@ -229,13 +258,14 @@ main() {
   local source_text
   source_text="$(build_source_text)"
 
-  local plan_name_hint source_hash base_branch_hint
+  local plan_name_hint source_hash base_branch_hint repo_base_branch_hint
   if [[ -n "$INPUT_MD" ]]; then
     plan_name_hint="$(basename "$INPUT_MD")"
     plan_name_hint="${plan_name_hint%.*}"
   else
     plan_name_hint="prompt-plan"
   fi
+  repo_base_branch_hint="$(detect_repo_base_branch "$repo_root")"
   source_hash="$(printf '%s' "$source_text" | python3 -c 'import hashlib,sys; print(hashlib.sha1(sys.stdin.buffer.read()).hexdigest()[:8])')"
   base_branch_hint="$(printf '%s\n' "$source_text" | python3 - <<'PY'
 import re
@@ -280,7 +310,7 @@ General:
 Git Strategy:
 
 * Use a single working branch for the full PRD plan and commit each task on that branch.
-* Set `git.base_branch` to `main` unless the source explicitly requests a different base branch.
+* Set `git.base_branch` to the repository's primary branch (typically `main` or `master`) unless the source explicitly requests a different base branch.
 * If the source includes directives like `base_branch: ...`, `sub_branch_of: ...`, or `branch_from: ...`, use that value for `git.base_branch`.
 * Set `git.working_branch` to a stable branch name for this plan (do not use per-task branches).
 * Set `git.branch_strategy` to `"plan-branch"`.
@@ -291,7 +321,7 @@ Task Structure:
 * Use deterministic task IDs in the format TASK-001, TASK-002, TASK-003, etc.
 * Assign priorities as ascending integers starting at 1 (TASK-001 has priority 1, etc.).
 * All tasks must have status set to "pending".
-* Each task must include: id, title, prompt, priority, status, depends_on, acceptance, validation, commit_message.
+* Each task must include: id, title, prompt, priority, status, depends_on, acceptance, validation, commit_message, report.
 * If the project requires runtime dependencies (for example Python packages, Node modules, toolchains, containers), make the first task an environment-readiness task that verifies prerequisites and installs dependencies.
 
 Task Design:
@@ -337,6 +367,7 @@ Consistency:
 * Ensure all referenced dependencies exist.
 
 PROMPT_HEADER
+    echo "Repository base branch hint: $repo_base_branch_hint"
     echo
     echo "Source input:"
     echo
@@ -364,7 +395,7 @@ PROMPT_HEADER
 
   archive_current_state
 
-  python3 - "$last_msg" "$OUT_FILE" "$MODE" "$DRY_RUN" "$repo_root" "$source_hash" "$plan_name_hint" "$base_branch_hint" >"$normalized_out" <<'PY'
+  python3 - "$last_msg" "$OUT_FILE" "$MODE" "$DRY_RUN" "$repo_root" "$source_hash" "$plan_name_hint" "$base_branch_hint" "$repo_base_branch_hint" >"$normalized_out" <<'PY'
 import datetime as dt
 import json
 import os
@@ -373,7 +404,7 @@ import shlex
 import sys
 from typing import Any, Optional
 
-generated_path, out_path, mode, dry_run, repo_root, source_hash, plan_name_hint, base_branch_hint = sys.argv[1:9]
+generated_path, out_path, mode, dry_run, repo_root, source_hash, plan_name_hint, base_branch_hint, repo_base_branch_hint = sys.argv[1:10]
 repo_root = os.path.abspath(repo_root)
 
 COMMON_COMMAND_V_TOOLS = {
@@ -539,6 +570,7 @@ def normalize(prd: dict[str, Any]) -> dict[str, Any]:
     base_branch = (
         sanitize_branch_name(git_cfg.get("base_branch"))
         or sanitize_branch_name(base_branch_hint)
+        or sanitize_branch_name(repo_base_branch_hint)
         or "main"
     )
     working_branch = sanitize_branch_name(git_cfg.get("working_branch")) or default_working_branch
@@ -558,7 +590,10 @@ def normalize(prd: dict[str, Any]) -> dict[str, Any]:
         if not task_id:
             raise ValueError("task id is required")
 
-        task.setdefault("report", f"reports/{task_id}.md")
+        report_value = str(task.get("report", "")).strip()
+        if report_value.lower() in {"pending", "retry", "done", "failed", "blocked"}:
+            report_value = ""
+        task["report"] = report_value or f"reports/{task_id}.md"
         task.pop("branch", None)
 
         title = str(task.get("title", "")).strip()

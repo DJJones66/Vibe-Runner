@@ -30,6 +30,8 @@ MAX_ITERATIONS=1
 INTERRUPTED=0
 PLAN_BASE_BRANCH=""
 PLAN_WORKING_BRANCH=""
+RESOLVED_BASE_BRANCH=""
+RESOLVED_BASE_REF=""
 
 mkdir -p "$LOG_DIR" "$REPORT_DIR"
 
@@ -134,7 +136,7 @@ supports_exec_search() {
 validation_indicates_env_block() {
   local output_file="$1"
   if grep -Eqi \
-    'EAI_AGAIN|ENOTFOUND|Temporary failure in name resolution|Could not resolve host|network_access=false|command not found|vitest: not found|pytest: command not found|npm: command not found|node: command not found|python: command not found|python3: command not found|Cannot find module|Cannot find type definition file|ModuleNotFoundError|No module named' \
+    'EAI_AGAIN|ENOTFOUND|Temporary failure in name resolution|Could not resolve host|network_access=false|command not found|vitest: not found|pytest: command not found|npm: command not found|node: command not found|python: command not found|python3: command not found' \
     "$output_file"; then
     return 0
   fi
@@ -302,19 +304,43 @@ PY
 
 resolve_base_branch_ref() {
   local base_branch="$1"
+  local alternate_branch=""
+  RESOLVED_BASE_BRANCH=""
+  RESOLVED_BASE_REF=""
   if git -C "$REPO_ROOT" rev-parse --verify "$base_branch" >/dev/null 2>&1; then
-    echo "$base_branch"
+    RESOLVED_BASE_BRANCH="$base_branch"
+    RESOLVED_BASE_REF="$base_branch"
     return 0
   fi
   if git -C "$REPO_ROOT" rev-parse --verify "origin/$base_branch" >/dev/null 2>&1; then
-    echo "origin/$base_branch"
+    RESOLVED_BASE_BRANCH="$base_branch"
+    RESOLVED_BASE_REF="origin/$base_branch"
     return 0
+  fi
+
+  if [[ "$base_branch" == "main" ]]; then
+    alternate_branch="master"
+  elif [[ "$base_branch" == "master" ]]; then
+    alternate_branch="main"
+  fi
+
+  if [[ -n "$alternate_branch" ]]; then
+    if git -C "$REPO_ROOT" rev-parse --verify "$alternate_branch" >/dev/null 2>&1; then
+      RESOLVED_BASE_BRANCH="$alternate_branch"
+      RESOLVED_BASE_REF="$alternate_branch"
+      return 0
+    fi
+    if git -C "$REPO_ROOT" rev-parse --verify "origin/$alternate_branch" >/dev/null 2>&1; then
+      RESOLVED_BASE_BRANCH="$alternate_branch"
+      RESOLVED_BASE_REF="origin/$alternate_branch"
+      return 0
+    fi
   fi
   return 1
 }
 
 ensure_plan_working_branch() {
-  local current base_ref
+  local current base_ref requested_base_branch
   current="$(git -C "$REPO_ROOT" branch --show-current)"
   if [[ "$current" == "$PLAN_WORKING_BRANCH" ]]; then
     return 0
@@ -330,9 +356,15 @@ ensure_plan_working_branch() {
     return 0
   fi
 
-  if ! base_ref="$(resolve_base_branch_ref "$PLAN_BASE_BRANCH")"; then
+  requested_base_branch="$PLAN_BASE_BRANCH"
+  if ! resolve_base_branch_ref "$requested_base_branch"; then
     log_event "Could not resolve base branch '$PLAN_BASE_BRANCH' (checked local and origin refs)."
     return 1
+  fi
+  base_ref="$RESOLVED_BASE_REF"
+  if [[ -n "$RESOLVED_BASE_BRANCH" && "$RESOLVED_BASE_BRANCH" != "$requested_base_branch" ]]; then
+    log_event "Base branch '$requested_base_branch' not found; using '$RESOLVED_BASE_BRANCH' for this repository."
+    PLAN_BASE_BRANCH="$RESOLVED_BASE_BRANCH"
   fi
 
   git -C "$REPO_ROOT" checkout -b "$PLAN_WORKING_BRANCH" "$base_ref" >>"$RUN_LOG" 2>&1
@@ -359,6 +391,12 @@ run_one_task() {
   if [[ -z "$commit_message" ]]; then
     commit_message="$id: $title"
   fi
+
+  case "${report_rel,,}" in
+    pending|retry|done|failed|blocked)
+      report_rel=""
+      ;;
+  esac
 
   if [[ -z "$report_rel" ]]; then
     report_rel="reports/${id}.md"
