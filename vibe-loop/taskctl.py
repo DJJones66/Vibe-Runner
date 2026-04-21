@@ -188,7 +188,12 @@ def cmd_field(args: argparse.Namespace) -> int:
 
 def render_prompt(codex_instructions: str, task: Dict[str, Any]) -> str:
     acceptance_lines = "\n".join(f"- {x}" for x in task.get("acceptance", []))
-    return f"""{codex_instructions}\n\n---\n\nTask ID: {task.get('id')}\nTitle: {task.get('title')}\nPriority: {task.get('priority')}\n\nImplementation Request:\n{task.get('prompt', '').strip()}\n\nAcceptance Criteria:\n{acceptance_lines}\n\nExecution requirements:\n- Make real code changes in this repository.\n- Keep changes scoped to this task.\n- Run relevant checks before finishing.\n- In your final response, use the exact sections requested in CODEX.md.\n"""
+    commit_message = str(task.get("commit_message") or "").strip()
+    if not commit_message:
+        task_id = str(task.get("id") or "").strip()
+        title = str(task.get("title") or "").strip()
+        commit_message = f"{task_id}: {title}".strip(": ")
+    return f"""{codex_instructions}\n\n---\n\nTask ID: {task.get('id')}\nTitle: {task.get('title')}\nPriority: {task.get('priority')}\nTarget Commit Message: {commit_message}\n\nImplementation Request:\n{task.get('prompt', '').strip()}\n\nAcceptance Criteria:\n{acceptance_lines}\n\nExecution requirements:\n- Make real code changes in this repository.\n- Keep changes scoped to this task.\n- Run relevant checks before finishing.\n- In your final response, use the exact sections requested in CODEX.md.\n"""
 
 
 def cmd_render_prompt(args: argparse.Namespace) -> int:

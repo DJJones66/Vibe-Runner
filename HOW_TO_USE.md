@@ -344,6 +344,12 @@ Arguments:
   - Number of tasks to process in this run.
   - Default: `1`.
 
+Branch model:
+- `runner.sh` uses one plan branch from `prd.json`:
+  - `git.base_branch` (defaults to `main` if omitted)
+  - `git.working_branch` (created from base if missing locally)
+- Each task is committed on that same plan branch using `tasks[].commit_message`.
+
 Options:
 - `--task <ID>`
   - Runs only the specified pending/retry task if dependency checks pass.
@@ -354,8 +360,8 @@ Options:
 - `--dry-run`
   - Selects/logs tasks but does not run `codex exec`.
 - `--reset-task-branches`
-  - Resets local `vibe/task-task-*` branches to current `HEAD` before task execution.
-  - Useful after clearing/archive cycles or task-plan rewrites.
+  - Resets legacy local `vibe/task-task-*` branches to current `HEAD` before task execution.
+  - Useful for cleanup after migrating from older task-branch PRDs.
 - `--status`
   - Prints task status summary and exits.
 - `--status-milestones`
@@ -375,19 +381,14 @@ Environment variables:
   - Codex sandbox mode.
   - Default: `workspace-write`.
 - `AUTO_PUSH`
-  - `1` pushes branch after successful commit.
+  - `1` pushes the plan working branch after successful commit.
   - Default: `0`.
-- `RESET_DIVERGED_TASK_BRANCH`
-  - `1` auto-resets an existing task branch to the current base commit if it truly diverged.
-  - `0` fails fast on divergence and logs guidance (safer default).
-  - Default: `0`.
-  - Note: branches that are only behind current base (no unique commits) are auto-reset automatically.
 - `ALLOW_DIRTY_LOOP_FILES`
   - `1` allows dirty changes only under `.codex/vibe-loop/**` and still blocks other dirty repo changes.
   - Helps when loop scripts were updated but product code is clean.
   - Default: `0`.
 - `PREP_RESET_TASK_BRANCHES`
-  - `1` resets local `vibe/task-task-*` branches to current `HEAD` before starting the loop.
+  - `1` resets legacy local `vibe/task-task-*` branches to current `HEAD` before starting the loop.
   - Equivalent to passing `--reset-task-branches`.
   - Default: `0`.
 - `AUTO_FIX_VALIDATION`
@@ -426,7 +427,7 @@ REASONING_EFFORT=high ./runner.sh 1
 # dry run
 ./runner.sh 2 --dry-run
 
-# reset task branches to current HEAD before running
+# reset legacy task branches to current HEAD before running
 ./runner.sh --reset-task-branches 9999
 ```
 
@@ -447,16 +448,13 @@ MAX_AUTO_FIX_ATTEMPTS=3 ./runner.sh 1
 # auto-block tasks when validation fails due environment/dependency issues
 AUTO_BLOCK_ENV_FAILURE=1 ./runner.sh 1
 
-# push branch automatically after successful commit
+# push the plan branch automatically after successful commit
 AUTO_PUSH=1 ./runner.sh 1
-
-# auto-reset an existing task branch when it diverged from current base
-RESET_DIVERGED_TASK_BRANCH=1 ./runner.sh --task TASK-010 1
 
 # allow loop-script updates without committing .codex changes first
 ALLOW_DIRTY_LOOP_FILES=1 ./runner.sh 1
 
-# pre-reset all local task branches before long run
+# pre-reset all legacy local task branches before long run
 PREP_RESET_TASK_BRANCHES=1 ./runner.sh 9999
 
 # combine multiple env vars for a tuned run
@@ -576,6 +574,13 @@ Purpose:
 - Converts either inline prompt text or a markdown spec into a valid `prd.json` using `codex exec`.
 - Enforces JSON shape using `.codex/vibe-loop/schemas/prd.schema.json`.
 - Rejects risky validation patterns that assume unknown custom CLI binaries (for example `command -v <custom-tool>`) unless they are discoverable from repo command surfaces.
+- Sets plan-level git metadata in PRD (`git.base_branch`, `git.working_branch`, `git.branch_strategy`).
+- Sets task-level commit titles in PRD (`tasks[].commit_message`) for runner commits.
+- Defaults `git.base_branch` to `main` unless generation input explicitly directs another base branch.
+- To force a non-main base branch from your plan text, include one of:
+  - `base_branch: <branch-name>`
+  - `sub_branch_of: <branch-name>`
+  - `branch_from: <branch-name>`
 
 Usage:
 ```bash
@@ -679,13 +684,13 @@ Options:
   - `.codex/vibe-loop/logs/`
   - `.codex/vibe-loop/HALT`
   - `.codex/vibe-loop/.last_prd_source`
-  - Also resets local `vibe/task-task-*` branches to current `HEAD` by default.
+  - Also resets legacy local `vibe/task-task-*` branches to current `HEAD` by default.
   - Useful when you want a true fresh slate before generating the next plan.
 - `--reset-task-branches`
-  - Resets local `vibe/task-task-*` branches to current `HEAD`.
+  - Resets legacy local `vibe/task-task-*` branches to current `HEAD`.
   - Can be used with or without `--clear-after-archive`.
 - `--no-reset-task-branches`
-  - Disables branch reset even when using `--clear-after-archive`.
+  - Disables legacy task-branch reset even when using `--clear-after-archive`.
 - `-h`, `--help`
   - Show help text.
 
@@ -703,14 +708,19 @@ Examples:
 # archive and clear live loop artifacts afterward
 ./archive_state.sh --clear-after-archive
 
-# archive, clear, but keep existing task branches untouched
+# archive, clear, but keep existing legacy task branches untouched
 ./archive_state.sh --clear-after-archive --no-reset-task-branches
 
-# only normalize task branches to current HEAD (no archive clear)
+# only normalize legacy task branches to current HEAD (no archive clear)
 ./archive_state.sh --reset-task-branches
 ```
 
 ## 8) `prd.json` Task Expectations
+`prd.json` should include plan-level git fields:
+- `git.base_branch` (`main` default when omitted)
+- `git.working_branch` (single branch used for all tasks in the plan)
+- `git.branch_strategy` (`plan-branch`)
+
 `runner.sh` and `taskctl.py` expect a task list in `prd.json` with fields like:
 - `id`
 - `title`
@@ -720,11 +730,8 @@ Examples:
 - `prompt`
 - `acceptance` (array)
 - `validation` (array of shell commands)
-- `branch` (optional)
+- `commit_message`
 - `report` (optional)
-
-If `branch` is missing, default branch naming is:
-- `vibe/task-<lowercased-task-id>`
 
 If `report` is missing, default report path is:
 - `reports/<TASK_ID>.md`

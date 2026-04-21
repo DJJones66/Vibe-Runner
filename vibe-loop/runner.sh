@@ -16,7 +16,6 @@ MODEL="${MODEL:-gpt-5.4}"
 REASONING_EFFORT="${REASONING_EFFORT:-}"
 SANDBOX="${SANDBOX:-workspace-write}"
 AUTO_PUSH="${AUTO_PUSH:-0}"
-RESET_DIVERGED_TASK_BRANCH="${RESET_DIVERGED_TASK_BRANCH:-0}"
 ALLOW_DIRTY_LOOP_FILES="${ALLOW_DIRTY_LOOP_FILES:-0}"
 PREP_RESET_TASK_BRANCHES="${PREP_RESET_TASK_BRANCHES:-0}"
 USE_SEARCH=0
@@ -29,6 +28,8 @@ STATUS_MILESTONES=0
 TASK_ID=""
 MAX_ITERATIONS=1
 INTERRUPTED=0
+PLAN_BASE_BRANCH=""
+PLAN_WORKING_BRANCH=""
 
 mkdir -p "$LOG_DIR" "$REPORT_DIR"
 
@@ -52,7 +53,7 @@ Options:
   --no-search      Disable web search for codex runs
   --search         Enable web search for codex runs (if supported by codex exec)
   --dry-run        Select tasks and log actions only (no codex execution)
-  --reset-task-branches  Reset local vibe/task-task-* branches to current HEAD before running
+  --reset-task-branches  Reset legacy local vibe/task-task-* branches to current HEAD before running
   --status         Print PRD status summary and exit
   --status-milestones  Print PRD milestone progress summary and exit
   -h, --help       Show this help
@@ -62,9 +63,8 @@ Environment:
   REASONING_EFFORT Optional reasoning effort passed via codex config override
   SANDBOX          Codex sandbox mode (default: workspace-write)
   AUTO_PUSH        1 to push branch after successful commit (default: 0)
-  RESET_DIVERGED_TASK_BRANCH  1 to auto-reset an existing task branch to the current base if it diverged (default: 0)
   ALLOW_DIRTY_LOOP_FILES  1 to allow dirty changes limited to .codex/vibe-loop/** (default: 0)
-  PREP_RESET_TASK_BRANCHES  1 to reset local vibe/task-task-* branches to current HEAD before running (default: 0)
+  PREP_RESET_TASK_BRANCHES  1 to reset legacy local vibe/task-task-* branches to current HEAD before running (default: 0)
   AUTO_FIX_VALIDATION  1 to let codex attempt one-pass fixes after validation fails (default: 0)
   MAX_AUTO_FIX_ATTEMPTS  Number of validation auto-fix attempts (default: 1)
   AUTO_BLOCK_ENV_FAILURE  1 to mark blocked when validation fails from missing env/deps (default: 1)
@@ -184,17 +184,17 @@ reset_task_branches_to_base() {
       reset_count=$((reset_count + 1))
     else
       failed_count=$((failed_count + 1))
-      log_event "Could not reset task branch '$branch' to base $base_short; continuing."
+      log_event "Could not reset legacy task branch '$branch' to base $base_short; continuing."
     fi
   done < <(git -C "$REPO_ROOT" for-each-ref --format='%(refname:short)' "refs/heads/vibe/task-task-*")
 
   if [[ "$reset_count" -gt 0 ]]; then
-    log_event "Reset $reset_count task branches to base $base_short before run."
+    log_event "Reset $reset_count legacy task branches to base $base_short before run."
   else
-    log_event "No existing task branches needed reset before run."
+    log_event "No legacy task branches needed reset before run."
   fi
   if [[ "$failed_count" -gt 0 ]]; then
-    log_event "$failed_count task branches could not be reset automatically."
+    log_event "$failed_count legacy task branches could not be reset automatically."
   fi
 }
 
@@ -208,7 +208,7 @@ ensure_loop_control_files() {
     fi
   done
   if [[ "$missing" -ne 0 ]]; then
-    log_event "Loop control files are missing. A checked-out task branch likely removed .codex/vibe-loop."
+    log_event "Loop control files are missing from the current branch."
     return 1
   fi
   return 0
@@ -240,38 +240,103 @@ else:
 PY
 }
 
-checkout_task_branch() {
-  local branch="$1"
-  local base_ref="$2"
-  local current
-  local base_short
-  current="$(git -C "$REPO_ROOT" branch --show-current)"
-  base_short="$(git -C "$REPO_ROOT" rev-parse --short "$base_ref")"
+load_prd_git_config() {
+  local cfg
+  cfg="$(python3 - "$PRD_FILE" <<'PY'
+import json
+import re
+import sys
+from typing import Any
 
-  if [[ "$current" == "$branch" ]]; then
+path = sys.argv[1]
+
+with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+def slugify(value: Any, fallback: str) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    text = re.sub(r"-{2,}", "-", text).strip("-")
+    return text or fallback
+
+def sanitize_branch(value: Any) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        return ""
+    text = re.sub(r"\s+", "-", text)
+    text = re.sub(r"[^A-Za-z0-9._/\-]+", "-", text)
+    text = re.sub(r"/{2,}", "/", text)
+    text = re.sub(r"-{2,}", "-", text)
+    parts = []
+    for part in text.split("/"):
+        cleaned = part.strip().strip(".").strip("-")
+        if cleaned in {"", ".", ".."}:
+            continue
+        if cleaned.endswith(".lock"):
+            cleaned = cleaned[: -len(".lock")]
+        cleaned = cleaned.strip(".").strip("-")
+        if cleaned:
+            parts.append(cleaned)
+    branch = "/".join(parts).strip("/")
+    if (
+        not branch
+        or branch.startswith("-")
+        or branch.endswith(".")
+        or ".." in branch
+        or "@{" in branch
+    ):
+        return ""
+    return branch
+
+git_cfg = data.get("git") if isinstance(data.get("git"), dict) else {}
+project_slug = slugify(data.get("project"), "project")
+base_branch = sanitize_branch(git_cfg.get("base_branch")) or "main"
+working_branch = sanitize_branch(git_cfg.get("working_branch")) or f"prd/{project_slug}"
+print(base_branch)
+print(working_branch)
+PY
+)"
+  PLAN_BASE_BRANCH="$(printf '%s\n' "$cfg" | sed -n '1p')"
+  PLAN_WORKING_BRANCH="$(printf '%s\n' "$cfg" | sed -n '2p')"
+}
+
+resolve_base_branch_ref() {
+  local base_branch="$1"
+  if git -C "$REPO_ROOT" rev-parse --verify "$base_branch" >/dev/null 2>&1; then
+    echo "$base_branch"
+    return 0
+  fi
+  if git -C "$REPO_ROOT" rev-parse --verify "origin/$base_branch" >/dev/null 2>&1; then
+    echo "origin/$base_branch"
+    return 0
+  fi
+  return 1
+}
+
+ensure_plan_working_branch() {
+  local current base_ref
+  current="$(git -C "$REPO_ROOT" branch --show-current)"
+  if [[ "$current" == "$PLAN_WORKING_BRANCH" ]]; then
     return 0
   fi
 
-  if git -C "$REPO_ROOT" rev-parse --verify "$branch" >/dev/null 2>&1; then
-    if git -C "$REPO_ROOT" merge-base --is-ancestor "$base_ref" "$branch"; then
-      git -C "$REPO_ROOT" checkout "$branch" >>"$RUN_LOG" 2>&1
-    elif git -C "$REPO_ROOT" merge-base --is-ancestor "$branch" "$base_ref"; then
-      # Existing task branch is behind current base with no unique commits.
-      # Safe to fast-forward/reset to the new base.
-      log_event "Branch '$branch' is behind base $base_short; resetting branch to current base."
-      git -C "$REPO_ROOT" checkout -B "$branch" "$base_ref" >>"$RUN_LOG" 2>&1
-    else
-      if [[ "$RESET_DIVERGED_TASK_BRANCH" == "1" ]]; then
-        log_event "Branch '$branch' diverged from base $base_short; resetting branch to current base."
-        git -C "$REPO_ROOT" checkout -B "$branch" "$base_ref" >>"$RUN_LOG" 2>&1
-      else
-        log_event "Branch '$branch' diverged from base $base_short; refusing checkout (set RESET_DIVERGED_TASK_BRANCH=1 to auto-reset)."
-        return 1
-      fi
-    fi
-  else
-    git -C "$REPO_ROOT" checkout -b "$branch" "$base_ref" >>"$RUN_LOG" 2>&1
+  if git -C "$REPO_ROOT" rev-parse --verify "$PLAN_WORKING_BRANCH" >/dev/null 2>&1; then
+    git -C "$REPO_ROOT" checkout "$PLAN_WORKING_BRANCH" >>"$RUN_LOG" 2>&1
+    return 0
   fi
+
+  if git -C "$REPO_ROOT" rev-parse --verify "origin/$PLAN_WORKING_BRANCH" >/dev/null 2>&1; then
+    git -C "$REPO_ROOT" checkout -b "$PLAN_WORKING_BRANCH" --track "origin/$PLAN_WORKING_BRANCH" >>"$RUN_LOG" 2>&1
+    return 0
+  fi
+
+  if ! base_ref="$(resolve_base_branch_ref "$PLAN_BASE_BRANCH")"; then
+    log_event "Could not resolve base branch '$PLAN_BASE_BRANCH' (checked local and origin refs)."
+    return 1
+  fi
+
+  git -C "$REPO_ROOT" checkout -b "$PLAN_WORKING_BRANCH" "$base_ref" >>"$RUN_LOG" 2>&1
+  return 0
 }
 
 stage_repo_changes() {
@@ -285,14 +350,14 @@ stage_repo_changes() {
 
 run_one_task() {
   local task_json="$1"
-  local id title branch report_rel report_abs base_ref
+  local id title commit_message report_rel report_abs current_branch
   id="$(extract_json_field "$task_json" "id")"
   title="$(extract_json_field "$task_json" "title")"
-  branch="$(extract_json_field "$task_json" "branch")"
+  commit_message="$(extract_json_field "$task_json" "commit_message")"
   report_rel="$(extract_json_field "$task_json" "report")"
 
-  if [[ -z "$branch" ]]; then
-    branch="vibe/task-${id,,}"
+  if [[ -z "$commit_message" ]]; then
+    commit_message="$id: $title"
   fi
 
   if [[ -z "$report_rel" ]]; then
@@ -301,22 +366,17 @@ run_one_task() {
 
   report_abs="$LOOP_ROOT/$report_rel"
   mkdir -p "$(dirname "$report_abs")"
+  current_branch="$(git -C "$REPO_ROOT" branch --show-current)"
 
-  log_event "Starting $id on branch '$branch': $title"
+  log_event "Starting $id on branch '$current_branch': $title"
 
   if [[ "$DRY_RUN" == "1" ]]; then
     log_event "Dry run: skipped codex execution for $id"
     return 0
   fi
 
-  base_ref="$(git -C "$REPO_ROOT" rev-parse --verify HEAD)"
-  if ! checkout_task_branch "$branch" "$base_ref"; then
-    python3 "$TASKCTL" mark "$PRD_FILE" "$id" "failed" "branch checkout failed; see logs/run.log" >>"$RUN_LOG" 2>&1 || true
-    log_event "Task $id failed during branch checkout"
-    return 1
-  fi
   if ! ensure_loop_control_files; then
-    log_event "Task $id failed because required loop files were removed after checkout"
+    log_event "Task $id failed because required loop files are missing on this branch"
     return 1
   fi
 
@@ -473,20 +533,20 @@ PY
   fi
 
   # Mark done before commit so task-state updates are included in the same commit.
-  python3 "$TASKCTL" mark "$PRD_FILE" "$id" "done" "report=$report_rel" >>"$RUN_LOG" 2>&1
+  python3 "$TASKCTL" mark "$PRD_FILE" "$id" "done" "report=$report_rel;commit_message=$commit_message" >>"$RUN_LOG" 2>&1
 
   stage_repo_changes
   if git -C "$REPO_ROOT" diff --cached --quiet; then
     log_event "Task $id completed with no commit-able changes"
   else
-    if git -C "$REPO_ROOT" commit -m "vibe(loop): complete $id - $title" >>"$RUN_LOG" 2>&1; then
+    if git -C "$REPO_ROOT" commit -m "$commit_message" >>"$RUN_LOG" 2>&1; then
       local sha
       sha="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
       if [[ "$AUTO_PUSH" == "1" ]]; then
         git -C "$REPO_ROOT" push -u origin "$(git -C "$REPO_ROOT" branch --show-current)" >>"$RUN_LOG" 2>&1
-        log_event "Pushed branch for $id"
+        log_event "Pushed plan branch for $id"
       fi
-      log_event "Task $id completed and committed ($sha)"
+      log_event "Task $id completed and committed ($sha): $commit_message"
     else
       python3 "$TASKCTL" mark "$PRD_FILE" "$id" "failed" "commit failed; see logs/run.log" >>"$RUN_LOG" 2>&1
       log_event "Task $id failed during commit"
@@ -523,11 +583,23 @@ if [[ "$STATUS_MILESTONES" == "1" ]]; then
   exit 0
 fi
 
-log_event "Runner start: model=$MODEL reasoning_effort=${REASONING_EFFORT:-default} sandbox=$SANDBOX search=$USE_SEARCH dry_run=$DRY_RUN auto_fix=$AUTO_FIX_VALIDATION auto_block_env=$AUTO_BLOCK_ENV_FAILURE allow_dirty_loop=$ALLOW_DIRTY_LOOP_FILES prep_reset_branches=$PREP_RESET_TASK_BRANCHES max_iterations=$MAX_ITERATIONS"
+load_prd_git_config
+log_event "Runner start: model=$MODEL reasoning_effort=${REASONING_EFFORT:-default} sandbox=$SANDBOX search=$USE_SEARCH dry_run=$DRY_RUN auto_fix=$AUTO_FIX_VALIDATION auto_block_env=$AUTO_BLOCK_ENV_FAILURE allow_dirty_loop=$ALLOW_DIRTY_LOOP_FILES prep_reset_branches=$PREP_RESET_TASK_BRANCHES max_iterations=$MAX_ITERATIONS base_branch=$PLAN_BASE_BRANCH working_branch=$PLAN_WORKING_BRANCH"
 
 if [[ "$PREP_RESET_TASK_BRANCHES" == "1" ]]; then
   reset_task_branches_to_base
 fi
+
+ensure_clean_git
+if ! ensure_plan_working_branch; then
+  log_event "Failed to checkout plan working branch '$PLAN_WORKING_BRANCH'."
+  exit 1
+fi
+if ! ensure_loop_control_files; then
+  log_event "Loop control files are missing on plan branch '$PLAN_WORKING_BRANCH'."
+  exit 1
+fi
+log_event "Using plan branch '$PLAN_WORKING_BRANCH' (base '$PLAN_BASE_BRANCH')."
 
 iter=1
 while [[ "$iter" -le "$MAX_ITERATIONS" ]]; do

@@ -2,6 +2,11 @@
   "project": "Vibe Runner Backlog",
   "version": "1.0",
   "updated_at": "2026-04-09T00:00:00+00:00",
+  "git": {
+    "base_branch": "main",
+    "working_branch": "prd/vibe-runner-backlog",
+    "branch_strategy": "plan-branch"
+  },
   "notes": {
     "definition_of_done": "All tasks in tasks[] are in done status."
   },

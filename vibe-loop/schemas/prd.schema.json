@@ -6,6 +6,7 @@
     "project",
     "version",
     "updated_at",
+    "git",
     "notes",
     "tasks"
   ],
@@ -21,6 +22,30 @@
     "updated_at": {
       "type": "string",
       "minLength": 1
+    },
+    "git": {
+      "type": "object",
+      "required": [
+        "base_branch",
+        "working_branch"
+      ],
+      "properties": {
+        "base_branch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "working_branch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "branch_strategy": {
+          "type": "string",
+          "enum": [
+            "plan-branch"
+          ]
+        }
+      },
+      "additionalProperties": false
     },
     "notes": {
       "type": "object",
@@ -46,7 +71,8 @@
           "depends_on",
           "prompt",
           "acceptance",
-          "validation"
+          "validation",
+          "commit_message"
         ],
         "properties": {
           "id": {
@@ -92,6 +118,14 @@
             "items": {
               "type": "string"
             }
+          },
+          "commit_message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "report": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "additionalProperties": false

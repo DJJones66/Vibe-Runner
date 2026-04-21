@@ -229,6 +229,32 @@ main() {
   local source_text
   source_text="$(build_source_text)"
 
+  local plan_name_hint source_hash base_branch_hint
+  if [[ -n "$INPUT_MD" ]]; then
+    plan_name_hint="$(basename "$INPUT_MD")"
+    plan_name_hint="${plan_name_hint%.*}"
+  else
+    plan_name_hint="prompt-plan"
+  fi
+  source_hash="$(printf '%s' "$source_text" | python3 -c 'import hashlib,sys; print(hashlib.sha1(sys.stdin.buffer.read()).hexdigest()[:8])')"
+  base_branch_hint="$(printf '%s\n' "$source_text" | python3 - <<'PY'
+import re
+import sys
+
+text = sys.stdin.read()
+patterns = [
+    r"(?im)^\s*base_branch\s*:\s*([A-Za-z0-9._/\-]+)\s*$",
+    r"(?im)^\s*sub_branch_of\s*:\s*([A-Za-z0-9._/\-]+)\s*$",
+    r"(?im)^\s*branch_from\s*:\s*([A-Za-z0-9._/\-]+)\s*$",
+]
+for pattern in patterns:
+    m = re.search(pattern, text)
+    if m:
+        print(m.group(1).strip())
+        break
+PY
+)"
+
   local prompt_file last_msg normalized_out
   prompt_file="$(mktemp)"
   last_msg="$(mktemp)"
@@ -251,13 +277,21 @@ General:
 * Do not include placeholder text such as "TODO", "TBD", or "to be implemented".
 * Do not hallucinate tools, APIs, files, or technologies not implied by the input.
 
+Git Strategy:
+
+* Use a single working branch for the full PRD plan and commit each task on that branch.
+* Set `git.base_branch` to `main` unless the source explicitly requests a different base branch.
+* If the source includes directives like `base_branch: ...`, `sub_branch_of: ...`, or `branch_from: ...`, use that value for `git.base_branch`.
+* Set `git.working_branch` to a stable branch name for this plan (do not use per-task branches).
+* Set `git.branch_strategy` to `"plan-branch"`.
+
 Task Structure:
 
 * Generate between 5 and 20 tasks unless the scope clearly requires otherwise.
 * Use deterministic task IDs in the format TASK-001, TASK-002, TASK-003, etc.
 * Assign priorities as ascending integers starting at 1 (TASK-001 has priority 1, etc.).
 * All tasks must have status set to "pending".
-* Each task must include: id, title, prompt, priority, status, depends_on, acceptance, validation.
+* Each task must include: id, title, prompt, priority, status, depends_on, acceptance, validation, commit_message.
 * If the project requires runtime dependencies (for example Python packages, Node modules, toolchains, containers), make the first task an environment-readiness task that verifies prerequisites and installs dependencies.
 
 Task Design:
@@ -330,7 +364,7 @@ PROMPT_HEADER
 
   archive_current_state
 
-  python3 - "$last_msg" "$OUT_FILE" "$MODE" "$DRY_RUN" "$repo_root" >"$normalized_out" <<'PY'
+  python3 - "$last_msg" "$OUT_FILE" "$MODE" "$DRY_RUN" "$repo_root" "$source_hash" "$plan_name_hint" "$base_branch_hint" >"$normalized_out" <<'PY'
 import datetime as dt
 import json
 import os
@@ -339,7 +373,7 @@ import shlex
 import sys
 from typing import Any, Optional
 
-generated_path, out_path, mode, dry_run, repo_root = sys.argv[1:6]
+generated_path, out_path, mode, dry_run, repo_root, source_hash, plan_name_hint, base_branch_hint = sys.argv[1:9]
 repo_root = os.path.abspath(repo_root)
 
 COMMON_COMMAND_V_TOOLS = {
@@ -377,6 +411,44 @@ def now_iso() -> str:
 def load_json(path: str) -> Any:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+def slugify(value: Any, fallback: str) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    text = re.sub(r"-{2,}", "-", text).strip("-")
+    return text or fallback
+
+def sanitize_branch_name(value: Any) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        return ""
+
+    text = re.sub(r"\s+", "-", text)
+    text = re.sub(r"[^A-Za-z0-9._/\-]+", "-", text)
+    text = re.sub(r"/{2,}", "/", text)
+    text = re.sub(r"-{2,}", "-", text)
+
+    parts: list[str] = []
+    for part in text.split("/"):
+        cleaned = part.strip().strip(".").strip("-")
+        if cleaned in {"", ".", ".."}:
+            continue
+        if cleaned.endswith(".lock"):
+            cleaned = cleaned[: -len(".lock")]
+        cleaned = cleaned.strip(".").strip("-")
+        if cleaned:
+            parts.append(cleaned)
+
+    branch = "/".join(parts).strip("/")
+    if (
+        not branch
+        or branch.startswith("-")
+        or branch.endswith(".")
+        or ".." in branch
+        or "@{" in branch
+    ):
+        return ""
+    return branch
 
 def discover_repo_cli_names(root: str) -> set[str]:
     names: set[str] = set()
@@ -456,6 +528,26 @@ def normalize(prd: dict[str, Any]) -> dict[str, Any]:
     prd.setdefault("tasks", [])
     prd["updated_at"] = now_iso()
 
+    project_slug = slugify(prd.get("project"), "project")
+    plan_slug = slugify(plan_name_hint, "plan")
+    hash_suffix = slugify(source_hash, "00000000")[:8]
+    default_working_branch = f"prd/{project_slug}/{plan_slug}-{hash_suffix}"
+
+    git_cfg = prd.get("git")
+    if not isinstance(git_cfg, dict):
+        git_cfg = {}
+    base_branch = (
+        sanitize_branch_name(git_cfg.get("base_branch"))
+        or sanitize_branch_name(base_branch_hint)
+        or "main"
+    )
+    working_branch = sanitize_branch_name(git_cfg.get("working_branch")) or default_working_branch
+    prd["git"] = {
+        "base_branch": base_branch,
+        "working_branch": working_branch,
+        "branch_strategy": "plan-branch",
+    }
+
     for task in prd["tasks"]:
         task.setdefault("status", "pending")
         task.setdefault("depends_on", [])
@@ -467,7 +559,12 @@ def normalize(prd: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("task id is required")
 
         task.setdefault("report", f"reports/{task_id}.md")
-        task.setdefault("branch", f"vibe/task-{task_id.lower()}")
+        task.pop("branch", None)
+
+        title = str(task.get("title", "")).strip()
+        default_commit = f"{task_id}: {title}" if title else f"{task_id}: complete task"
+        commit_message = str(task.get("commit_message", "")).strip()
+        task["commit_message"] = commit_message or default_commit
 
     return prd
 

@@ -23,8 +23,8 @@ Options:
   --name <label>   Optional archive label suffix (example: plan-1)
   --dry-run        Print what would be archived without writing files
   --clear-after-archive  Clear live loop artifacts after a successful archive
-  --reset-task-branches  Reset local vibe/task-task-* branches to current HEAD
-  --no-reset-task-branches  Disable task-branch reset even with --clear-after-archive
+  --reset-task-branches  Reset legacy local vibe/task-task-* branches to current HEAD
+  --no-reset-task-branches  Disable legacy task-branch reset even with --clear-after-archive
   -h, --help       Show this help
 
 Behavior:
@@ -44,7 +44,7 @@ Behavior:
     - ./.codex/vibe-loop/HALT
     - ./.codex/vibe-loop/.last_prd_source
 
-  Task branch reset:
+  Legacy task branch reset:
     - When --clear-after-archive is used, local vibe/task-task-* branches
       are reset to current HEAD by default.
 USAGE
@@ -204,13 +204,13 @@ clear_live_loop_state() {
 reset_task_branches_to_base() {
   local base_ref base_short current branch reset_count failed_count
   if [[ -z "$REPO_ROOT" ]]; then
-    echo "Skipping task branch reset: repository root not found."
+    echo "Skipping legacy task-branch reset: repository root not found."
     return 0
   fi
 
   base_ref="$(git -C "$REPO_ROOT" rev-parse --verify HEAD 2>/dev/null || true)"
   if [[ -z "$base_ref" ]]; then
-    echo "Skipping task branch reset: could not resolve HEAD."
+    echo "Skipping legacy task-branch reset: could not resolve HEAD."
     return 0
   fi
 
@@ -226,17 +226,17 @@ reset_task_branches_to_base() {
       reset_count=$((reset_count + 1))
     else
       failed_count=$((failed_count + 1))
-      echo "Could not reset task branch '$branch' to base $base_short; continuing."
+      echo "Could not reset legacy task branch '$branch' to base $base_short; continuing."
     fi
   done < <(git -C "$REPO_ROOT" for-each-ref --format='%(refname:short)' "refs/heads/vibe/task-task-*")
 
   if [[ "$reset_count" -gt 0 ]]; then
-    echo "Reset $reset_count task branches to base $base_short"
+    echo "Reset $reset_count legacy task branches to base $base_short"
   else
-    echo "No local task branches needed reset"
+    echo "No local legacy task branches needed reset"
   fi
   if [[ "$failed_count" -gt 0 ]]; then
-    echo "$failed_count task branches could not be reset automatically"
+    echo "$failed_count legacy task branches could not be reset automatically"
   fi
 }
 
@@ -289,7 +289,7 @@ main() {
       echo "Would clear: $LAST_PRD_SOURCE_FILE"
     fi
     if [[ "$RESET_TASK_BRANCHES" == "1" ]]; then
-      echo "Would reset: local vibe/task-task-* branches to current HEAD"
+      echo "Would reset: local legacy vibe/task-task-* branches to current HEAD"
     fi
     exit 0
   fi
