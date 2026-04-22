@@ -481,6 +481,29 @@ def sanitize_branch_name(value: Any) -> str:
         return ""
     return branch
 
+def normalize_report_path(value: Any, task_id: str) -> str:
+    default_report = f"reports/{task_id}.md"
+    text = str(value or "").strip()
+    if not text:
+        return default_report
+    if text.lower() in {"pending", "retry", "done", "failed", "blocked"}:
+        return default_report
+    if "\n" in text or "\r" in text:
+        return default_report
+    if text.startswith("/") or text.startswith("~"):
+        return default_report
+    if ".." in text:
+        return default_report
+    if any(ch.isspace() for ch in text):
+        return default_report
+    if not text.endswith(".md"):
+        return default_report
+    if "/" not in text:
+        return default_report
+    if not re.fullmatch(r"[A-Za-z0-9._/-]+", text):
+        return default_report
+    return text
+
 def discover_repo_cli_names(root: str) -> set[str]:
     names: set[str] = set()
 
@@ -590,10 +613,7 @@ def normalize(prd: dict[str, Any]) -> dict[str, Any]:
         if not task_id:
             raise ValueError("task id is required")
 
-        report_value = str(task.get("report", "")).strip()
-        if report_value.lower() in {"pending", "retry", "done", "failed", "blocked"}:
-            report_value = ""
-        task["report"] = report_value or f"reports/{task_id}.md"
+        task["report"] = normalize_report_path(task.get("report", ""), task_id)
         task.pop("branch", None)
 
         title = str(task.get("title", "")).strip()
@@ -604,10 +624,14 @@ def normalize(prd: dict[str, Any]) -> dict[str, Any]:
     return prd
 
 def extract_python_c_snippet(command: str) -> Optional[str]:
+    subject = extract_bash_lc_inner(command)
+    if subject is None:
+        subject = command
+
     try:
-        parts = shlex.split(command, posix=True)
-    except ValueError as exc:
-        raise ValueError(f"invalid shell quoting in validation command: {exc}") from exc
+        parts = shlex.split(subject, posix=True)
+    except ValueError:
+        return None
 
     for idx, token in enumerate(parts):
         base = os.path.basename(token)
@@ -644,8 +668,8 @@ def extract_command_v_target(command: str) -> Optional[str]:
 
     try:
         parts = shlex.split(subject, posix=True)
-    except ValueError as exc:
-        raise ValueError(f"invalid shell quoting in validation command: {exc}") from exc
+    except ValueError:
+        return None
 
     for idx, token in enumerate(parts):
         if token != "command":
@@ -675,6 +699,16 @@ def looks_like_noop_validation(command: str) -> bool:
 
     return False
 
+def shell_quoting_error(command: str) -> Optional[str]:
+    subject = extract_bash_lc_inner(command)
+    if subject is None:
+        subject = command
+    try:
+        shlex.split(subject, posix=True)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
 def validate_generated_tasks(prd: dict[str, Any], known_repo_clis: set[str]) -> None:
     for task in prd.get("tasks", []):
         task_id = str(task.get("id", "")).strip() or "<missing-id>"
@@ -690,6 +724,12 @@ def validate_generated_tasks(prd: dict[str, Any], known_repo_clis: set[str]) -> 
                 raise ValueError(
                     f"task {task_id}: validation[{index}] appears to be a no-op check; "
                     "use a real executable verification command"
+                )
+
+            quote_error = shell_quoting_error(command)
+            if quote_error:
+                raise ValueError(
+                    f"task {task_id}: validation[{index}] has invalid shell quoting: {quote_error}"
                 )
 
             command_v_target = extract_command_v_target(command)
@@ -713,35 +753,39 @@ def validate_generated_tasks(prd: dict[str, Any], known_repo_clis: set[str]) -> 
                     f"(line {exc.lineno}, column {exc.offset}): {exc.msg}"
                 ) from exc
 
-generated = normalize(load_json(generated_path))
-known_repo_clis = discover_repo_cli_names(repo_root)
-validate_generated_tasks(generated, known_repo_clis)
+try:
+    generated = normalize(load_json(generated_path))
+    known_repo_clis = discover_repo_cli_names(repo_root)
+    validate_generated_tasks(generated, known_repo_clis)
 
-if mode == "append" and os.path.exists(out_path):
-    existing = normalize(load_json(out_path))
-    existing_ids = {str(task["id"]) for task in existing.get("tasks", [])}
-    new_ids = [str(task["id"]) for task in generated.get("tasks", [])]
-    duplicates = sorted(set(new_ids).intersection(existing_ids))
-    if duplicates:
-        raise ValueError(
-            "duplicate task ids found in append mode: " + ", ".join(duplicates)
-        )
-    existing["tasks"].extend(generated.get("tasks", []))
-    existing["updated_at"] = now_iso()
-    final = existing
-else:
-    final = generated
+    if mode == "append" and os.path.exists(out_path):
+        existing = normalize(load_json(out_path))
+        existing_ids = {str(task["id"]) for task in existing.get("tasks", [])}
+        new_ids = [str(task["id"]) for task in generated.get("tasks", [])]
+        duplicates = sorted(set(new_ids).intersection(existing_ids))
+        if duplicates:
+            raise ValueError(
+                "duplicate task ids found in append mode: " + ", ".join(duplicates)
+            )
+        existing["tasks"].extend(generated.get("tasks", []))
+        existing["updated_at"] = now_iso()
+        final = existing
+    else:
+        final = generated
 
-if dry_run == "1":
-    print(json.dumps(final, indent=2))
-else:
-    out_dir = os.path.dirname(os.path.abspath(out_path))
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(final, f, indent=2)
-        f.write("\n")
-    print(f"Wrote PRD: {out_path}")
+    if dry_run == "1":
+        print(json.dumps(final, indent=2))
+    else:
+        out_dir = os.path.dirname(os.path.abspath(out_path))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(final, f, indent=2)
+            f.write("\n")
+        print(f"Wrote PRD: {out_path}")
+except ValueError as exc:
+    print(f"PRD generation validation error: {exc}", file=sys.stderr)
+    raise SystemExit(1)
 PY
 
   cat "$normalized_out"

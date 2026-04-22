@@ -22,6 +22,8 @@ USE_SEARCH=0
 AUTO_FIX_VALIDATION="${AUTO_FIX_VALIDATION:-0}"
 MAX_AUTO_FIX_ATTEMPTS="${MAX_AUTO_FIX_ATTEMPTS:-1}"
 AUTO_BLOCK_ENV_FAILURE="${AUTO_BLOCK_ENV_FAILURE:-1}"
+CODEX_EXEC_MAX_RETRIES="${CODEX_EXEC_MAX_RETRIES:-3}"
+CODEX_EXEC_RETRY_DELAY_SECONDS="${CODEX_EXEC_RETRY_DELAY_SECONDS:-20}"
 DRY_RUN=0
 STATUS_ONLY=0
 STATUS_MILESTONES=0
@@ -70,6 +72,8 @@ Environment:
   AUTO_FIX_VALIDATION  1 to let codex attempt one-pass fixes after validation fails (default: 0)
   MAX_AUTO_FIX_ATTEMPTS  Number of validation auto-fix attempts (default: 1)
   AUTO_BLOCK_ENV_FAILURE  1 to mark blocked when validation fails from missing env/deps (default: 1)
+  CODEX_EXEC_MAX_RETRIES  Number of retries for transient codex exec failures (default: 3)
+  CODEX_EXEC_RETRY_DELAY_SECONDS  Delay between transient codex exec retries (default: 20)
   HALT=true        Stop before next task starts
 USAGE
 }
@@ -150,6 +154,28 @@ validation_indicates_env_block() {
   fi
 
   return 1
+}
+
+codex_exec_is_transient_failure() {
+  local output_file="$1"
+  grep -Eqi \
+    'Selected model is at capacity|at capacity|rate limit|429|503|temporarily unavailable|server overloaded|Please try again|try a different model|timed out|timeout|connection reset|ECONNRESET|ETIMEDOUT' \
+    "$output_file"
+}
+
+is_valid_report_path() {
+  local path="$1"
+  [[ -n "$path" ]] || return 1
+  [[ "$path" != /* ]] || return 1
+  [[ "$path" != ~* ]] || return 1
+  [[ "$path" != *$'\n'* ]] || return 1
+  [[ "$path" != *$'\r'* ]] || return 1
+  [[ "$path" != *".."* ]] || return 1
+  [[ "$path" != *[[:space:]]* ]] || return 1
+  [[ "$path" == *.md ]] || return 1
+  [[ "$path" == */* ]] || return 1
+  [[ "$path" =~ ^[A-Za-z0-9._/-]+$ ]] || return 1
+  return 0
 }
 
 ensure_clean_git() {
@@ -398,7 +424,10 @@ run_one_task() {
       ;;
   esac
 
-  if [[ -z "$report_rel" ]]; then
+  if ! is_valid_report_path "$report_rel"; then
+    if [[ -n "$report_rel" ]]; then
+      log_event "Task $id provided invalid report path; defaulting to reports/$id.md"
+    fi
     report_rel="reports/${id}.md"
   fi
 
@@ -443,19 +472,49 @@ run_one_task() {
     fi
   fi
 
-  log_event "Running codex exec for $id"
-  if ! "${cmd[@]}" - <"$prompt_file" >>"$RUN_LOG" 2>&1; then
+  local exec_output_file exec_attempt exec_succeeded
+  exec_output_file="$(mktemp)"
+  exec_attempt=1
+  exec_succeeded=0
+
+  while [[ "$exec_attempt" -le "$CODEX_EXEC_MAX_RETRIES" ]]; do
+    log_event "Running codex exec for $id (attempt $exec_attempt/$CODEX_EXEC_MAX_RETRIES)"
+    if "${cmd[@]}" - <"$prompt_file" >"$exec_output_file" 2>&1; then
+      cat "$exec_output_file" >>"$RUN_LOG"
+      exec_succeeded=1
+      break
+    fi
+
+    cat "$exec_output_file" >>"$RUN_LOG"
     if [[ "$INTERRUPTED" == "1" ]]; then
       python3 "$TASKCTL" mark "$PRD_FILE" "$id" "retry" "interrupted by user during codex exec; safe to rerun" >>"$RUN_LOG" 2>&1 || true
       log_event "Task $id interrupted by user during codex exec"
-      rm -f "$prompt_file" "$last_msg"
+      rm -f "$prompt_file" "$last_msg" "$exec_output_file"
       return 130
+    fi
+
+    if codex_exec_is_transient_failure "$exec_output_file" && [[ "$exec_attempt" -lt "$CODEX_EXEC_MAX_RETRIES" ]]; then
+      log_event "codex exec transient failure for $id; retrying in ${CODEX_EXEC_RETRY_DELAY_SECONDS}s"
+      sleep "$CODEX_EXEC_RETRY_DELAY_SECONDS"
+      ((exec_attempt++))
+      continue
+    fi
+    break
+  done
+
+  if [[ "$exec_succeeded" != "1" ]]; then
+    if codex_exec_is_transient_failure "$exec_output_file"; then
+      python3 "$TASKCTL" mark "$PRD_FILE" "$id" "retry" "transient codex exec failure after ${CODEX_EXEC_MAX_RETRIES} attempts; safe to rerun" >>"$RUN_LOG" 2>&1 || true
+      log_event "Task $id marked retry after transient codex exec failure"
+      rm -f "$prompt_file" "$last_msg" "$exec_output_file"
+      return 2
     fi
     python3 "$TASKCTL" mark "$PRD_FILE" "$id" "failed" "codex exec failed; see logs/run.log" >>"$RUN_LOG" 2>&1
     log_event "Task $id failed during codex exec"
-    rm -f "$prompt_file" "$last_msg"
+    rm -f "$prompt_file" "$last_msg" "$exec_output_file"
     return 1
   fi
+  rm -f "$exec_output_file"
 
   cp "$last_msg" "$report_abs"
   log_event "Wrote report: $report_rel"
@@ -670,6 +729,12 @@ while [[ "$iter" -le "$MAX_ITERATIONS" ]]; do
     if [[ "$rc" -eq 130 || "$INTERRUPTED" == "1" ]]; then
       log_event "Stopping loop due to user interrupt."
       exit 130
+    fi
+    if [[ "$rc" -eq 2 ]]; then
+      log_event "Continuing loop after retryable task failure."
+      sleep "$CODEX_EXEC_RETRY_DELAY_SECONDS"
+      ((iter++))
+      continue
     fi
     log_event "Stopping loop after failure."
     exit 1
