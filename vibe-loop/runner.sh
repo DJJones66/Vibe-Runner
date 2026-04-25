@@ -19,8 +19,8 @@ AUTO_PUSH="${AUTO_PUSH:-0}"
 ALLOW_DIRTY_LOOP_FILES="${ALLOW_DIRTY_LOOP_FILES:-0}"
 PREP_RESET_TASK_BRANCHES="${PREP_RESET_TASK_BRANCHES:-0}"
 USE_SEARCH=0
-AUTO_FIX_VALIDATION="${AUTO_FIX_VALIDATION:-0}"
-MAX_AUTO_FIX_ATTEMPTS="${MAX_AUTO_FIX_ATTEMPTS:-1}"
+AUTO_FIX_VALIDATION="${AUTO_FIX_VALIDATION:-1}"
+MAX_AUTO_FIX_ATTEMPTS="${MAX_AUTO_FIX_ATTEMPTS:-3}"
 AUTO_BLOCK_ENV_FAILURE="${AUTO_BLOCK_ENV_FAILURE:-1}"
 CODEX_EXEC_MAX_RETRIES="${CODEX_EXEC_MAX_RETRIES:-3}"
 CODEX_EXEC_RETRY_DELAY_SECONDS="${CODEX_EXEC_RETRY_DELAY_SECONDS:-20}"
@@ -69,8 +69,8 @@ Environment:
   AUTO_PUSH        1 to push branch after successful commit (default: 0)
   ALLOW_DIRTY_LOOP_FILES  1 to allow dirty changes limited to .codex/vibe-loop/** (default: 0)
   PREP_RESET_TASK_BRANCHES  1 to reset legacy local vibe/task-task-* branches to current HEAD before running (default: 0)
-  AUTO_FIX_VALIDATION  1 to let codex attempt one-pass fixes after validation fails (default: 0)
-  MAX_AUTO_FIX_ATTEMPTS  Number of validation auto-fix attempts (default: 1)
+  AUTO_FIX_VALIDATION  1 to let codex attempt one-pass fixes after validation fails (default: 1)
+  MAX_AUTO_FIX_ATTEMPTS  Number of validation auto-fix attempts (default: 3)
   AUTO_BLOCK_ENV_FAILURE  1 to mark blocked when validation fails from missing env/deps (default: 1)
   CODEX_EXEC_MAX_RETRIES  Number of retries for transient codex exec failures (default: 3)
   CODEX_EXEC_RETRY_DELAY_SECONDS  Delay between transient codex exec retries (default: 20)
@@ -660,6 +660,11 @@ parse_args "$@"
 require_tools
 trap on_interrupt INT TERM
 
+if ! [[ "$MAX_AUTO_FIX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
+  log_event "Invalid MAX_AUTO_FIX_ATTEMPTS='$MAX_AUTO_FIX_ATTEMPTS'; defaulting to 3."
+  MAX_AUTO_FIX_ATTEMPTS=3
+fi
+
 REPO_ROOT="$(git -C "$LOOP_ROOT" rev-parse --show-toplevel 2>/dev/null || true)"
 if [[ -z "$REPO_ROOT" ]]; then
   echo "Could not determine git repository root from $LOOP_ROOT" >&2
@@ -682,6 +687,9 @@ fi
 
 load_prd_git_config
 log_event "Runner start: model=$MODEL reasoning_effort=${REASONING_EFFORT:-default} sandbox=$SANDBOX search=$USE_SEARCH dry_run=$DRY_RUN auto_fix=$AUTO_FIX_VALIDATION auto_block_env=$AUTO_BLOCK_ENV_FAILURE allow_dirty_loop=$ALLOW_DIRTY_LOOP_FILES prep_reset_branches=$PREP_RESET_TASK_BRANCHES max_iterations=$MAX_ITERATIONS base_branch=$PLAN_BASE_BRANCH working_branch=$PLAN_WORKING_BRANCH"
+if [[ "$AUTO_FIX_VALIDATION" != "1" ]]; then
+  log_event "Auto-fix is disabled (AUTO_FIX_VALIDATION=$AUTO_FIX_VALIDATION); validation failures will stop without fix attempts."
+fi
 
 if [[ "$PREP_RESET_TASK_BRANCHES" == "1" ]]; then
   reset_task_branches_to_base
@@ -718,7 +726,16 @@ while [[ "$iter" -le "$MAX_ITERATIONS" ]]; do
 
   task_json="$(get_task_json)"
   if [[ -z "$task_json" ]]; then
-    log_event "No pending tasks found."
+    if [[ -n "$TASK_ID" ]]; then
+      task_status="$(python3 "$TASKCTL" field "$PRD_FILE" "$TASK_ID" status 2>>"$RUN_LOG" || true)"
+      if [[ -n "$task_status" ]]; then
+        log_event "Task $TASK_ID is not runnable (status=$task_status; dependencies may be unmet). Set status to pending/retry to rerun."
+      else
+        log_event "Task $TASK_ID not found in PRD."
+      fi
+    else
+      log_event "No pending tasks found."
+    fi
     break
   fi
 

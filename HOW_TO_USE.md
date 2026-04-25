@@ -393,10 +393,10 @@ Environment variables:
   - Default: `0`.
 - `AUTO_FIX_VALIDATION`
   - `1` enables auto-fix pass after validation failure.
-  - Default: `0` (strict mode).
+  - Default: `1`.
 - `MAX_AUTO_FIX_ATTEMPTS`
   - Number of auto-fix attempts.
-  - Default: `1`.
+  - Default: `3`.
 - `AUTO_BLOCK_ENV_FAILURE`
   - `1` marks task `blocked` when validation fails due missing dependencies/tools/network.
   - Default: `1`.
@@ -461,7 +461,18 @@ PREP_RESET_TASK_BRANCHES=1 ./runner.sh 9999
 MODEL=gpt-5.4 REASONING_EFFORT=high AUTO_FIX_VALIDATION=1 MAX_AUTO_FIX_ATTEMPTS=2 ./runner.sh 2 --search
 ```
 
-Recommended strict production run:
+Recommended resilient production run:
+```bash
+MODEL=gpt-5.3-codex \
+REASONING_EFFORT=high \
+SANDBOX=workspace-write \
+AUTO_FIX_VALIDATION=1 \
+MAX_AUTO_FIX_ATTEMPTS=3 \
+AUTO_BLOCK_ENV_FAILURE=1 \
+./runner.sh 9999
+```
+
+Optional strict mode (no auto-fix retries):
 ```bash
 MODEL=gpt-5.3-codex \
 REASONING_EFFORT=high \

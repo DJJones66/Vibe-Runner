@@ -31,3 +31,7 @@ cd .codex/vibe-loop
 ./runner.sh --status
 ./runner.sh 1
 ```
+
+Default run behavior:
+- Validation auto-fix retries are enabled by default (`AUTO_FIX_VALIDATION=1`).
+- Maximum validation auto-fix attempts default to `3` (`MAX_AUTO_FIX_ATTEMPTS=3`).
