@@ -628,6 +628,12 @@ Environment variables:
   - `1` archives existing state before `replace`.
   - `0` disables archive behavior.
   - Default: `0`.
+- `CODEX_EXEC_MAX_RETRIES`
+  - Number of retries for transient `codex exec` failures during PRD generation.
+  - Default: `3`.
+- `CODEX_EXEC_RETRY_DELAY_SECONDS`
+  - Delay between transient retry attempts.
+  - Default: `20`.
 
 Examples:
 ```bash
@@ -651,7 +657,14 @@ MODEL=gpt-5.4 REASONING_EFFORT=high ./generate_prd.sh --from-md /path/to/PRODUCT
 
 # replace without archiving old state
 ./generate_prd.sh --from-md ./plan_1.md --mode replace --no-archive-state
+
+# tolerate transient codex backend errors with longer retry window
+CODEX_EXEC_MAX_RETRIES=5 CODEX_EXEC_RETRY_DELAY_SECONDS=30 ./generate_prd.sh --from-md ./plan_1.md
 ```
+
+Known transient warning:
+- If you see `failed to record rollout items: thread ... not found`, generation now treats it as transient/non-fatal behavior.
+- If a generation run still exits non-zero, rerun once; the script now retries these transient failures automatically before failing.
 
 ## 7) Manual Archive Command (`archive_state.sh`)
 Path in target project:

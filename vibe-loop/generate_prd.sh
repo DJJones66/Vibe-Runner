@@ -13,6 +13,8 @@ SANDBOX="${SANDBOX:-workspace-write}"
 USE_SEARCH=0
 MODE="replace"
 ARCHIVE_ON_REPLACE="${ARCHIVE_ON_REPLACE:-0}"
+CODEX_EXEC_MAX_RETRIES="${CODEX_EXEC_MAX_RETRIES:-3}"
+CODEX_EXEC_RETRY_DELAY_SECONDS="${CODEX_EXEC_RETRY_DELAY_SECONDS:-20}"
 DRY_RUN=0
 INPUT_PROMPT=""
 INPUT_MD=""
@@ -43,6 +45,9 @@ Environment:
   REASONING_EFFORT       Optional reasoning effort (low|medium|high, model-dependent)
   SANDBOX                Codex sandbox mode (default: workspace-write)
   ARCHIVE_ON_REPLACE     1 to archive existing loop state before replace (default: 0)
+  CODEX_EXEC_MAX_RETRIES Number of retries for transient codex exec failures (default: 3)
+  CODEX_EXEC_RETRY_DELAY_SECONDS
+                         Delay between transient retries in seconds (default: 20)
 USAGE
 }
 
@@ -107,6 +112,24 @@ require_tools() {
 
 supports_exec_search() {
   codex exec --help 2>/dev/null | rg -q -- '--search'
+}
+
+codex_exec_is_transient_failure() {
+  local output_file="$1"
+  grep -Eqi \
+    'Selected model is at capacity|at capacity|rate limit|429|503|temporarily unavailable|server overloaded|Please try again|try a different model|timed out|timeout|connection reset|ECONNRESET|ETIMEDOUT|failed to record rollout items: thread .* not found' \
+    "$output_file"
+}
+
+emit_codex_exec_output() {
+  local output_file="$1"
+  local benign_pattern='failed to record rollout items: thread .* not found'
+  if grep -Eqi "$benign_pattern" "$output_file"; then
+    grep -Evi "$benign_pattern" "$output_file" >&2 || true
+    echo "codex exec emitted a known non-fatal session logging warning; continuing." >&2
+  else
+    cat "$output_file" >&2
+  fi
 }
 
 validate_inputs() {
@@ -387,7 +410,31 @@ PROMPT_HEADER
     fi
   fi
 
-  if ! "${cmd[@]}" - <"$prompt_file" >/dev/null; then
+  local exec_output_file exec_attempt exec_succeeded
+  exec_output_file="$(mktemp)"
+  exec_attempt=1
+  exec_succeeded=0
+
+  while [[ "$exec_attempt" -le "$CODEX_EXEC_MAX_RETRIES" ]]; do
+    if "${cmd[@]}" - <"$prompt_file" >"$exec_output_file" 2>&1; then
+      emit_codex_exec_output "$exec_output_file"
+      exec_succeeded=1
+      break
+    fi
+
+    emit_codex_exec_output "$exec_output_file"
+    if codex_exec_is_transient_failure "$exec_output_file" && [[ "$exec_attempt" -lt "$CODEX_EXEC_MAX_RETRIES" ]]; then
+      echo "codex exec transient failure during PRD generation; retrying in ${CODEX_EXEC_RETRY_DELAY_SECONDS}s (attempt $exec_attempt/$CODEX_EXEC_MAX_RETRIES)." >&2
+      sleep "$CODEX_EXEC_RETRY_DELAY_SECONDS"
+      ((exec_attempt++))
+      continue
+    fi
+    break
+  done
+
+  rm -f "$exec_output_file"
+
+  if [[ "$exec_succeeded" != "1" ]]; then
     echo "codex exec failed while generating PRD." >&2
     rm -f "$prompt_file" "$last_msg" "$normalized_out"
     exit 1

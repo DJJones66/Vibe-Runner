@@ -159,7 +159,7 @@ validation_indicates_env_block() {
 codex_exec_is_transient_failure() {
   local output_file="$1"
   grep -Eqi \
-    'Selected model is at capacity|at capacity|rate limit|429|503|temporarily unavailable|server overloaded|Please try again|try a different model|timed out|timeout|connection reset|ECONNRESET|ETIMEDOUT' \
+    'Selected model is at capacity|at capacity|rate limit|429|503|temporarily unavailable|server overloaded|Please try again|try a different model|timed out|timeout|connection reset|ECONNRESET|ETIMEDOUT|failed to record rollout items: thread .* not found' \
     "$output_file"
 }
 
